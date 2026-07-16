@@ -1837,6 +1837,8 @@ def generate_log_template_star(fwords,realcall):
     log_template = regex.sub("\?","\?",log_template)
     log_template = regex.sub("\+","\+",log_template)
     log_template = regex.sub("\|","\|",log_template)
+    log_template = regex.sub(r"\{", r"\\{", log_template)
+    log_template = regex.sub(r"\}", r"\\}", log_template)
     #log_template = re.sub("\\\\","~201~",log_template)
 
     #log_template = re.sub("\*","\S+",log_template)
@@ -2443,6 +2445,8 @@ def escape_log_template(s):
     s = regex.sub("\?","\?",s)
     s = regex.sub("\+","\+",s)
     s = regex.sub("\|","\|",s)
+    s = regex.sub(r"\{", r"\\{", s)
+    s = regex.sub(r"\}", r"\\}", s)
     return s
 
 
