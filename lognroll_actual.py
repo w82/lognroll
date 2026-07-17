@@ -260,7 +260,7 @@ def split_by_delimiter(lvl, str_data, delim):
         str_data = s[1:len(s)-1] # remove spaces at the front and back
 
     # split the input string by delimiter
-    tokenized = regex.split("("+delim+")",str_data) # keep the delimiter within the list
+    tokenized = regex.split("("+regex.escape(delim)+")",str_data) # keep the delimiter within the list
 
     # remove empty token
     removed = True
