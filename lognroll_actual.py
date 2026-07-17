@@ -34,6 +34,7 @@ tm011=0.0
 UNIFORM_THRESHOLD=0.98
 STAR_THRESHOLD=25
 LOGLEN_THRESHOLD=int(1024*6) 
+MISSING_TOKEN="<MISSING>"
 
 
 
@@ -1685,6 +1686,14 @@ def do_filtering(tlogs, valid_vect, flt_words, flt_valid_vect):
             if flt_words[j]=='*':
                 continue
 
+            # Match a missing filter word only when this column is absent.
+            if flt_words[j]==MISSING_TOKEN:
+                if j>=len(tlog):
+                    continue
+                else:
+                    add_ok = False
+                    break
+
             if j>len(tlog)-1: 
                 add_ok = False
                 break
@@ -2051,11 +2060,14 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 
             column_dict = defaultdict()
             for tlog in filtered_logs: # tlog is the filtered and tokenized log lines
-                if len(tlog) > tpos: 
+                # Missing positions participate in the column frequency.
+                if len(tlog) > tpos:
                     tok = tlog[tpos]
-                    if tok not in column_dict: # if key is not yet created, make one
-                        column_dict[tok] = 0
-                    column_dict[tok] += 1 # increment count
+                else:
+                    tok = MISSING_TOKEN
+                if tok not in column_dict: # if key is not yet created, make one
+                    column_dict[tok] = 0
+                column_dict[tok] += 1 # increment count
             all_column_dict[tpos] = column_dict
 
             if len(column_dict)==0: 
@@ -2207,7 +2219,10 @@ def construct_candidate_log_templates(input_logs, rep_logs):
     # All filter_mask is filled now.
     # Generate a log template
     #print "Callling generate_log_template_star() 3"
-    log_template = generate_log_template_star(filter_words,True)
+    template_words = filter_words
+    if MISSING_TOKEN in template_words:
+        template_words = template_words[:template_words.index(MISSING_TOKEN)]
+    log_template = generate_log_template_star(template_words,True)
 
     candidate_set.append(log_template)
 
