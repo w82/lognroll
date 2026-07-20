@@ -2050,6 +2050,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
         max_runlen = 0
         max_runlen_pct = 0.0
         max_runlen_pos = -1
+        max_runlen_positions = []
 
         all_column_dict = defaultdict() # dict of dict, column_dict per tpos is saved here
         for tpos in range(0,column_cnt):
@@ -2078,10 +2079,11 @@ def construct_candidate_log_templates(input_logs, rep_logs):
             runlength = column_dict[runlength_token] 
 
             runlen_percent = float(runlength*100.0)/float(len(filtered_logs))
-            if runlen_percent<100.0 and runlen_percent>max_runlen_pct: 
-                max_runlen = runlength
+            if runlen_percent<100.0 and runlen_percent>max_runlen_pct:
                 max_runlen_pct = runlen_percent
-                max_runlen_pos = tpos
+                max_runlen_positions = [tpos]
+            elif runlen_percent<100.0 and runlen_percent==max_runlen_pct:
+                max_runlen_positions.append(tpos)
             #print tpos, max_runlen_pos, "->"+runlength_token+"<-", runlen_percent
 
             if runlength==len(filtered_logs):
@@ -2110,6 +2112,11 @@ def construct_candidate_log_templates(input_logs, rep_logs):
                 print("Exiting loop since all filters are determined.", filter_mask)
                 print("->filter_words:", filter_words)
             break
+
+        if len(max_runlen_positions)>1:
+            max_runlen_pos = max_runlen_positions[randint(0,len(max_runlen_positions)-1)]
+        elif len(max_runlen_positions)==1:
+            max_runlen_pos = max_runlen_positions[0]
 
         if max_runlen_pos==-1: 
             print("ERROR: max column not selected!!!")
