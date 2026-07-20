@@ -31,7 +31,9 @@ tm009=0.0
 tm010=0.0
 tm011=0.0
 
+# KS-test boundaries from Section 4.2.5.
 UNIFORM_THRESHOLD=0.98
+UNIFORM_EPSILON=0.08
 STAR_THRESHOLD=25
 LOGLEN_THRESHOLD=int(1024*6) 
 MISSING_TOKEN="<MISSING>"
@@ -1078,7 +1080,7 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
             print("    \033[43;5m"+"WILDCARD because new pattern is detected."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because new pattern is detected."+"\033[0m"
         return '*', pv, cr
-    if pv>UNIFORM_THRESHOLD:
+    if pv>(1.0 + UNIFORM_THRESHOLD) / 2.0:
         if debug_mode:
             print("    \033[43;5m"+"WILDCARD because it is a uniform distribution."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because it is a uniform distribution."+"\033[0m"
@@ -2159,22 +2161,22 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 #            print("pv: " + str(pv))
 
             if new_fword=="*":
-                if pv<UNIFORM_THRESHOLD: 
+                if pv<UNIFORM_THRESHOLD:
                     filter_words,filter_mask = finalize_filter_with_star(filter_words,filter_mask)
                 else:
                     tw,tm = finalize_filter_with_star(filter_words,filter_mask)
-                    log_template = generate_log_template_star(tw,False) 
+                    log_template = generate_log_template_star(tw,False)
                     #print "log template:", log_template
                     if exist_match(log_template, rep_logs)>=0:
                         new_fword = sorted(target_dict, key=lambda k: target_dict[k], reverse=True)[0]
                     else:
                         filter_words,filter_mask = finalize_filter_with_star(filter_words,filter_mask)
 
-            else: 
-                if pv>0.9 and pv<UNIFORM_THRESHOLD: 
-                    if add_candidate==False: 
+            else:
+                if pv > UNIFORM_THRESHOLD - UNIFORM_EPSILON and pv <= (1.0 + UNIFORM_THRESHOLD) / 2.0:
+                    if add_candidate==False:
                         add_candidate = True
-                else: 
+                else:
                     pass
 
                 if add_candidate:
@@ -2188,6 +2190,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
                     else:
                         #print "\033[1;91mCandidate REJECTED", "\033[0m ","\033[1;95mCandidate:", "\033[0m \033[90;102m", "".join(tw), "\033[0m "
                         pass
+                    add_candidate = False
 
             if new_fword!="*": 
                 filter_mask[max_runlen_pos] = 1
