@@ -1097,7 +1097,7 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
         return '*', pv, cr
 
     token =  sorted(token_d, key=lambda k: token_d[k], reverse=True)[0]
-    if '~' in token:
+    if '~' in token.replace('~200~', ''):
         if debug_mode:
             print("    \033[43;5m"+"WILDCARD because it is a known pattern."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because it is a known pattern."+"\033[0m"
