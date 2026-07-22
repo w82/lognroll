@@ -35,7 +35,6 @@ tm011=0.0
 UNIFORM_THRESHOLD=0.98
 UNIFORM_EPSILON=0.08
 STAR_THRESHOLD=25
-LOGLEN_THRESHOLD=int(1024*6) 
 MISSING_TOKEN="<MISSING>"
 
 
@@ -1216,11 +1215,6 @@ def mark_matched_logs(logs, vect, rlogs, log_template, i):
 
         log = logs[j]
 
-        # TODO if log is too long, it takes too long to match the regular expression even though the number of wildcard is OK.
-        # I am shortening the log
-#        if len(log)>LOGLEN_THRESHOLD:
-#            log = log[:LOGLEN_THRESHOLD]
-
         matched = regex.match("^"+log_template+"$",log)
         if matched!=None:
             vect[j] = i
@@ -2260,57 +2254,54 @@ def lcs(S,T):
     return lcs_set
 
 
-# thelogs will be reduced by matching log templates
-# logtem is a list of 'count','template' dict
-def compute_slcpl(thelogs, logtem):
+def _pair_lcs_length_sum(template_a, template_b, pair_cache):
+    # TODO: Compare token sequences directly to remove basechar encoding and template truncation.
+    basechar="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()_+[]\{}|;:,./<>?`~=-ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■"
+
+    if len(template_a)>len(basechar):
+        print("\n\n    Number of tokens in the template:",len(template_a))
+        print("    Length of basechar:",len(basechar))
+        print("    "+str(template_a))
+        print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
+        del template_a[len(basechar)-1:]
+
+    if len(template_b)>len(basechar):
+        print("\n\n    Number of tokens in the template:",len(template_b))
+        print("    Length of basechar:",len(basechar))
+        print("    "+str(template_b))
+        print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
+        del template_b[len(basechar)-1:]
+
+    key_a = tuple(template_a)
+    key_b = tuple(template_b)
+    # Use the same cache key regardless of template order.
+    if key_b < key_a:
+        cache_key = (key_b, key_a)
+    else:
+        cache_key = (key_a, key_b)
+
+    if cache_key in pair_cache:
+        return pair_cache[cache_key]
+
+    token_d = {}
+    n = 0
+    for tok in key_a + key_b:
+        if tok in token_d:
+            continue
+        token_d[tok] = basechar[n]
+        n += 1
+
+    str_a = "".join(token_d[tok] for tok in key_a)
+    str_b = "".join(token_d[tok] for tok in key_b)
+    result = sum(len(item) for item in lcs(str_a,str_b))
+
+    pair_cache[cache_key] = result
+    return result
 
 
-    selected = []
-    for t in sorted(logtem, key=lambda k: k['count'], reverse=True):
-        # first, build a list of index to delete
-        to_delete = []
-        for i in range(0,len(thelogs)):
-            log = thelogs[i]
-            matched = regex.match("^"+t["template"]+"$",log)
-
-            if matched!=None:
-                to_delete.append(i)
-
-        # delete matched logs
-        before_removal = len(thelogs)
-        to_delete = sorted(to_delete)
-        for i in reversed(sorted(to_delete)):
-            del thelogs[i]
-        del_count = before_removal - len(thelogs)
-
-        #print "Removed",del_count,"logs."
-        #if del_count==0:
-        #    print "\033[33;31m",format(del_count,'5d'), format(int(t['count']),'5d'), t['template'], "\033[0m"
-
-        if del_count>0:
-            #t['template'] = t['template'].replace(".*","")
-            t['template'] = do_tokenization([t['template'].replace(".*","")])[0] 
-            selected.append(t)
-            #print t['template']
-
-    #print len(thelogs),"logs remaining."
-    #print "Initial log template count:", len(logtem)
-    #print "Selected log template count:", len(selected)
-
-#    selected =  [
-#        { 
-#            'template': "abcd abcd ",
-#            'count': 10
-#        },
-#        { 
-#            'template': "abcd ccc ",
-#            'count': 10
-#        },
-#        { 
-#            'template': "abcd ddd",
-#            'count': 10
-#        },
-#    ]
+# logtem is a list of 'count','template' dict with tokenized static templates
+def compute_slcpl(logtem, pair_cache):
+    selected = copy.deepcopy(logtem)
 
     SL_sum = 0
     total_log_count = 0 
@@ -2341,54 +2332,12 @@ def compute_slcpl(thelogs, logtem):
             if i==j: 
                 continue
 
-            n=0
-            token_d = {}
-            basechar="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()_+[]\{}|;:,./<>?`~=-ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■"
+            set_len_sum += _pair_lcs_length_sum(
+                selected[i]['template'],
+                selected[j]['template'],
+                pair_cache,
+            )
 
-            if len(selected[i]['template'])>len(basechar):
-                print("\n\n    Number of tokens in the template:",len(selected[i]['template']))
-                print("    Length of basechar:",len(basechar))
-                print("    "+str(selected[i]['template']))
-                print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
-                selected[i]['template'] = selected[i]['template'][0:len(basechar)-1]
-                #sys.exit(0)
-
-            if len(selected[j]['template'])>len(basechar):
-                print("\n\n    Number of tokens in the template:",len(selected[j]['template']))
-                print("    Length of basechar:",len(basechar))
-                print("    "+str(selected[j]['template']))
-                print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
-                selected[j]['template'] = selected[j]['template'][0:len(basechar)-1]
-                #sys.exit(0)
-
-            for tok in selected[i]['template']:
-                if tok not in token_d:
-                    token_d[tok]=basechar[n]
-                    n+=1
-            for tok in selected[j]['template']:
-                if tok not in token_d:
-                    token_d[tok]=basechar[n]
-                    n+=1
-
-            if n>len(basechar):
-                print("\033[0;32mERROR: Not enough char set!!", n, len(basechar), "\033[0m")
-                sys.exit(0)
-
-            str_i=""
-            for tok in selected[i]['template']:
-                str_i = str_i + token_d[tok]
-            str_j=""
-            for tok in selected[j]['template']:
-                str_j = str_j + token_d[tok]
-
-            lcs_set = lcs(str_i,str_j)  # get common character set
-
-            #total_cpl +=  sum(len(x) for x in lcs_set)/len(lcs_set) # not used
-            # sum length of all the set elements
-            # multiply by the 'count'
-            # after the loop, divide by the total log count
-            for k in lcs_set:
-                set_len_sum += len(k)
         set_len_sum = float(set_len_sum)/float(len(selected))
 
 #        set_len_sum = float(set_len_sum)/float(len(logtem)) # divide by the log template count because template i is compared with all the rest
@@ -2413,43 +2362,95 @@ def compute_slcpl(thelogs, logtem):
 
 
 
-def mark_matched_logs2(logs, mask, template, verbose=False):
-    marked=0
-    for i in range(0, len(logs)):
-        if mask[i]>-1:
+def _evaluate_leaf(leaf_node, score_cache, pair_cache):
+    # Keep valid templates from this leaf for scoring.
+    selected = []
+    for t in leaf_node.log_templates:
+        if t is None:
+            continue
+        if t["count"]>0:
+            selected.append({
+                "count":int(t["count"]),
+                "template":str(t["template"]),
+            })
+
+    score_key = tuple((t["count"],t["template"]) for t in selected)
+    if score_cache is not None and score_key in score_cache:
+        SL,CPL = score_cache[score_key]
+    else:
+        # Tokenize static template parts for SL/CPL scoring.
+        scoring_templates = []
+        for t in selected:
+            template = t['template']
+            scoring_templates.append({
+                "count":t["count"],
+                "template":do_tokenization([template.replace(".*","")])[0],
+            })
+
+        # Compute the SL and CPL scores for this leaf.
+        SL,CPL = compute_slcpl(scoring_templates,pair_cache)
+        if score_cache is not None:
+            score_cache[score_key] = (SL,CPL)
+    return {
+        "node": leaf_node,
+        "selected": selected,
+        "sum_matched": sum(t["count"] for t in selected),
+        "remaining_count": leaf_node.all_vect.count(-1),
+        "SL": SL,
+        "CPL": CPL,
+        "score": SL-CPL,
+    }
+
+
+def _select_best_leaf(tree):
+    leaf_nodes = []
+    for leaf_node in tree.nodes:
+        if not leaf_node.is_leaf_node():
+            continue
+        if -1 in leaf_node.all_vect:
+            print("Skipping unfinished leaf:", leaf_node.name)
+            continue
+        leaf_nodes.append(leaf_node)
+
+    print("Completed leaf count:",len(leaf_nodes))
+
+    best_result = None
+    score_cache = {}
+    pair_cache = {}
+    for leaf_index, leaf_node in enumerate(leaf_nodes):
+
+        print(
+            "Evaluating leaf",
+            str(leaf_index+1)+"/"+str(len(leaf_nodes))+":"
+        )
+        leaf_node.print_node()
+        result = _evaluate_leaf(
+            leaf_node,
+            score_cache,
+            pair_cache,
+        )
+        if result is None:
+            print("Skipping leaf with no effective templates:", leaf_node.name)
             continue
 
-        if verbose:
-            if i%(len(logs)/30)==0:
-                sys.stdout.write('\r'+"    \033[1;91m "+"{0:.1f}".format(float(i*100)/float(len(logs)))+"% \033[0m"+template)
-                sys.stdout.flush()
+        print("    Sum of matched logs:", result["sum_matched"])
+        print("   ",result["remaining_count"],"logs remaining.")
+        print("    Initial template count:", len(leaf_node.log_templates))
+        print("    Selected template count:", len(result["selected"]))
+        print("    SL= "+str(result["SL"]))
+        print("    CPL= "+str(result["CPL"]))
+        print("    score= "+str(result["score"]))
 
-        log = logs[i]
-        first_len = len(log)
-        if len(log)>LOGLEN_THRESHOLD: # If log is too long, match time becomes too long. So, let's cut off.
-            log = log[:LOGLEN_THRESHOLD-3072] # seems 3072 is sufficient
-            if verbose:
-                print("\n\033[0;32m"+template+"\033[0m")
-                print("\033[1;91m<"+str(i)+"/"+str(len(logs))+":"+"{0:.1f}".format(float(i*100)/float(len(logs)))+"%>\033[0m",log)
-                print(first_len,"->",len(log))
-        else:
-            if verbose:
-                print(first_len)
+        if best_result is None or result["score"]>best_result["score"]:
+            best_result = result
 
-        #if len(log)==LOGLEN_THRESHOLD:
-        #    new_tem=template.replace(".*","\S*")
-        #    template=new_tem
+    print("Cached leaf score sets:",len(score_cache))
+    print("Cached template-pair scores:",len(pair_cache))
 
-        matched = regex.match('^'+template+'$', log)
-        if matched!=None:
-            mask[i]=99
-            marked+=1
-            #if "Logging to" in log:
-            #    print "==>", template
-    return marked
+    return best_result
 
 
-def tokenize_log_template(s):    
+def tokenize_log_template(s):
 
     s = regex.sub("\\\\","",s)
     tok = custom_split(s) 
@@ -2634,15 +2635,6 @@ if __name__ == '__main__':
 
     print("Loading all logs into memory.")
     raw_logs = read_log_files( openfile_list, None ) 
-
-#    cur_node = pickle.load(open("cur_node.bin","rb"))
-#    #for aa in cur_node.log_templates[:50]:
-#    #    print aa
-#    #sys.exit(0)
-#    mylogs = copy.deepcopy(raw_logs)
-#    SL,CPL = compute_slcpl(mylogs, cur_node.log_templates)
-#    sys.exit(0)
-
 
     old_log_count = len(raw_logs)
     rep_logs = remove_log_template_matches(raw_logs, prepopulated_log_templates)
@@ -2860,7 +2852,7 @@ if __name__ == '__main__':
         #raw_input("\033[1;94m->Press ENTER to continue ...\033[0m")
 
     # END of outer while loop - done removing all the logs
-    runtime_elapsed = time.time() - runtime_checkpt
+    discovery_elapsed = time.time() - runtime_checkpt
 
     print("{0:8.3f}".format(tm001), "Apply all patterns")
     print("{0:8.3f}".format(tm002), "Apply new patterns")
@@ -2873,117 +2865,27 @@ if __name__ == '__main__':
     print("{0:8.3f}".format(tm004), "Tokenizing logs")
     print("{0:8.3f}".format(tm005), "Filtering all columns")
     print("{0:8.3f}".format(tm011), "Match and remove logs")
-    print("{0:8.3f}".format(runtime_elapsed-tm001-tm002-tm003-tm004-tm005-tm006-tm007-tm008-tm009-tm010-tm011), "Unaccounted")
-    print("{0:8.3f}".format(runtime_elapsed), "\033[0;103mEnd-to-end runtime\033[0m")
+    print("{0:8.3f}".format(discovery_elapsed-tm001-tm002-tm003-tm004-tm005-tm006-tm007-tm008-tm009-tm010-tm011), "Unaccounted")
+    print("{0:8.3f}".format(discovery_elapsed), "\033[0;103mTemplate discovery runtime\033[0m")
 
     print("\033[1;34m",tree.show("top"),"...\033[0m")
     print(" ")
 
-    temp_list=[]
-    for cur_node in tree.nodes:
-        if cur_node.is_leaf_node():
-            #for t in sorted(cur_node.log_templates, reverse=False):
-            #    print "\033[1;103m["+format(t["count"],'4d')+"]\033[0m\n","\""+t["template"]+"\","
-            for t in cur_node.log_templates:
-                if t != None:
-                    temp_list.append(t)
+    scoring_checkpt = time.time()
+    best_result = _select_best_leaf(tree)
+    scoring_elapsed = time.time() - scoring_checkpt
+    if best_result is None:
+        print("ERROR: No completed leaf has an effective template set.", file=sys.stderr)
+        sys.exit(1)
 
-    mycount=0
-    for t in sorted(temp_list, key=lambda k: k['count'], reverse=True):
-        #print mycount,"\033[1;103m["+format(t["count"],'4d')+"]\033[0m\n","\""+t["template"]+"\","
+    print("{0:8.3f}".format(scoring_elapsed), "\033[0;103mLeaf scoring runtime\033[0m")
+    print("{0:8.3f}".format(discovery_elapsed+scoring_elapsed), "\033[0;103mDiscovery plus scoring runtime\033[0m")
+
+    best_node = best_result["node"]
+    print("Best leaf:", best_node.name, "["+best_node.identifier+"]")
+    print("Best leaf SL:", best_result["SL"])
+    print("Best leaf CPL:", best_result["CPL"])
+    print("Best leaf score:", best_result["score"])
+    print("Final template count:", len(best_result["selected"]))
+    for t in sorted(best_result["selected"], key=lambda k: k["count"], reverse=True):
         print(t["count"],t["template"])
-        mycount+=1
-
-    sys.exit(0)
-
-#    for cur_node in tree.nodes:
-#        if cur_node.is_leaf_node():
-#            for t in sorted(cur_node.log_templates, key=lambda k: k['count'], reverse=False):
-#                print "\033[1;103m["+format(t["count"],'4d')+"]\033[0m\n","\""+t["template"]+"\","
-#
-#    for cur_node in tree.nodes:
-#        if cur_node.is_leaf_node():
-#            cur_node.print_node()
-#            for i in range(0,len(cur_node.log_templates)):
-#                t = cur_node.log_templates[i]
-#                print "00000,\""+t['template']+"\",0"
-
-    for cur_node in tree.nodes:
-        if cur_node.is_leaf_node():
-            cur_node.print_node()
-
-            selected=[]
-            mylogs = copy.deepcopy(raw_logs)
-            xlog_templates=[] 
-            log_mask=[-1 for _ in range(len(mylogs))] 
-            for i in range(0,len(cur_node.log_templates)):
-                t = cur_node.log_templates[i]
-                if t==None: 
-                    continue
-
-                #print "\n\033[0;32m"+t['template']+"\033[0m"
-                marked = mark_matched_logs2(mylogs, log_mask, t['template'], False)
-                #print "["+str(i)+"]",marked,t['template']
-
-                xlog_templates.append((marked, t['template'])) 
-                log_mask=[-1 for _ in range(len(mylogs))] 
-    
-                progress_mod=max(5,len(cur_node.log_templates)/40)
-                if i%progress_mod==0:
-                    sys.stdout.write('\r'+"\033[0;103mMatch counting processed "+"{0:.1f}".format(float(i*100)/float(len(cur_node.log_templates)))+"% \033[0m")
-                    sys.stdout.flush()
-
-            #pickle.dump(xlog_templates,open(reuse_filename,"wb"))
-
-            sum_matched=0
-            for t in sorted(xlog_templates,reverse=True):
-                sum_matched += int(t[0])
-            print("    Sum of matched logs:",sum_matched)
-
-            for t in sorted(xlog_templates, reverse=True):
-                # first, build a list of index to delete
-                to_delete = []
-                for i in range(0,len(mylogs)):
-                    log = mylogs[i]
-                    matched = re.match("^"+t[1]+"$",log)
-    
-                    if matched!=None:
-                        to_delete.append(i)
-    
-                # delete matched logs
-                before_removal = len(mylogs)
-                to_delete = sorted(to_delete)
-                for i in reversed(sorted(to_delete)):
-                    del mylogs[i]
-                del_count = before_removal - len(mylogs)
-                #print "Removed",del_count,"logs.",t[1]
-                #if del_count>0:
-                #    print "\033[33;31m",format(del_count,'5d'), format(int(t[0]),'5d'), t[1], "\033[0m"
-
-                #if "Memory usage of ProcessTree" in t[1]:
-                #if "addStoredBlock: blockMap updated:" in t[1]:
-                #if "INFO org.martbay.log:" in t[1]:
-                #    print "\033[33;31m",format(del_count,'5d'), format(int(t[0]),'5d'), t[1], "\033[0m"
-
-                if del_count>0:
-                    #selected.append(t[1])
-                    selected.append({"count":del_count,"template":str(t[1])})
-                    print("\033[33;31m",format(del_count,'5d'), format(int(t[0]),'5d'), t[1], "\033[0m")
-                else:
-                    print("\033[33;32m",format(del_count,'5d'), format(int(t[0]),'5d'), t[1], "\033[0m")
-    
-            print("   ",len(mylogs),"logs remaining.")
-            print("    Initial template count:", len(xlog_templates))
-            print("    Selected template count:", len(selected))
-
-
-
-            mylogs = copy.deepcopy(raw_logs)
-            #SL,CPL = compute_slcpl(mylogs, cur_node.log_templates)
-            SL,CPL = compute_slcpl(mylogs, selected)
-
-            print("SL= "+str(SL))
-            print("CPL= "+str(CPL))
-            #print "\033[1;94mscore= "+str(SL*1.0/(1.0+CPL)), "\033[0m"
-            print("\033[1;94mscore= "+str(SL-CPL), "\033[0m")
-            print(sum_matched, len(mylogs), "0.0", len(cur_node.log_templates), len(selected), "0.0", SL, CPL)
