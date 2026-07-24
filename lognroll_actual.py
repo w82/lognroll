@@ -818,8 +818,8 @@ number_patterns = [
 
     {   "pattern": "\-?\d+\.\d+",     # FP num
         "type":"float",
-        "increment":"0.1",
-        "serial": "0.1" },
+        "increment":"1",
+        "serial": "1" },
 
     {   "pattern":"\-?\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in integer value
         "type":"int_time",
@@ -828,8 +828,8 @@ number_patterns = [
 
     {   "pattern":"\-?\d+\.\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in FP value
         "type":"float_time",
-        "increment":"0.1",
-        "serial": "0.1" },
+        "increment":"1",
+        "serial": "1" },
 
     {   "pattern":"\-?\d+\^\d+", # exponent
         "type":"exponent",
@@ -875,14 +875,17 @@ def uniquify_numbers(tlogs):
                     tlogs[i][j] = p["serial"] 
                     p["serial"] = str(int(p["serial"])+int(p["increment"])) #
                 elif p["type"]=="float":
-                    tlogs[i][j] = p["serial"]
-                    p["serial"] = str(float(p["serial"])+float(p["increment"]))
+                    # Keep a decimal representation without binary float drift.
+                    serial = int(p["serial"])
+                    tlogs[i][j] = str(serial//10)+"."+str(serial%10)
+                    p["serial"] = str(serial+int(p["increment"]))
                 elif p["type"]=="int_time": 
                     tlogs[i][j] = p["serial"]+matched.group(1)
                     p["serial"] = str(int(p["serial"])+int(p["increment"]))
                 elif p["type"]=="float_time":
-                    tlogs[i][j] = p["serial"]+matched.group(1)
-                    p["serial"] = str(float(p["serial"])+float(p["increment"]))
+                    serial = int(p["serial"])
+                    tlogs[i][j] = str(serial//10)+"."+str(serial%10)+matched.group(1)
+                    p["serial"] = str(serial+int(p["increment"]))
                 elif p["type"]=="exponent":
                     tlogs[i][j] = p["serial"]
                     p["serial"] = str(int(p["serial"])+int(p["increment"]))
@@ -1800,7 +1803,7 @@ def generate_log_template_star(fwords,realcall):
 #                        { "pattern":" \-?\d+\.\d+$",  "type":"float" }, # FP
 
                         { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+) ?(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"int_time" }, # millisec, seconds, microsec ... in integer value
-                        #{ "pattern":"\-?\d+\.\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"float_time" }, # millisec, seconds, microsec ... in FP value
+                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+\.\d+) ?(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"float_time" }, # FP value with unit
                         #{ "pattern":"\-?\d+\^\d+", "type":"exponent", "increment":"1" }, # exponent
                         #{ "pattern": "0x[\da-fA-F]+", "type":"hexa1" },
                         #{ "pattern": "[\da-fA-F]+", "type":"hexa2"}
@@ -1871,7 +1874,7 @@ def generate_log_template_star(fwords,realcall):
 
     final_template = []
     for t in log_template.split():
-        if ".*" in t and "=.*" not in t and ":.*" not in t: 
+        if ".*" in t and "=.*" not in t and ":.*" not in t and regex.match("^\.+\*(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)$", t)==None:
             final_template.append(".*")
         else:
             final_template.append(t)
