@@ -2453,8 +2453,8 @@ def _select_best_leaf(tree):
 def tokenize_log_template(s):
 
     s = regex.sub("\\\\","",s)
-    tok = custom_split(s) 
-    for y in range(0,len(tok)): 
+    tok = custom_split(s)
+    for y in range(0,len(tok)):
         if '~' in tok[y]:
             tok[y]=".*"
     return tok
@@ -2767,9 +2767,10 @@ if __name__ == '__main__':
             log_template = candidate_set[0]
 
             tok_candi = tokenize_log_template(log_template) # tok_candi: tokenized candidate
+            merged_template_indices = []
             printed = False
             for i in range(0,len(cur_node.log_templates)):
-                if cur_node.log_templates[i]==None: 
+                if cur_node.log_templates[i]==None:
                     continue
                 tok_logtm = tokenize_log_template(cur_node.log_templates[i]["template"]) # tok_lt: tokenized log template
 
@@ -2781,7 +2782,7 @@ if __name__ == '__main__':
                         if tok_candi[j]!=tok_logtm[j]:
                             diff_count+=1
                             diff_loc = j
-                            if diff_count==2: 
+                            if diff_count==2:
                                 break
                     if diff_count==1:
                         if not printed:
@@ -2793,20 +2794,11 @@ if __name__ == '__main__':
                         print("   Token to update:", tok_logtm[diff_loc])
                         tok_logtm[diff_loc]=".*"
                         log_template = escape_log_template("".join(tok_logtm))
+                        tok_candi = tokenize_log_template(log_template)
                         print("   New log_template:", log_template)
+                        merged_template_indices.append(i)
                         cur_node.log_templates[i]=None
                         cur_node.rep_logs[i]=None
-
-            #if del_marked:
-            #    for i in reversed(range(0,len(cur_node.log_templates))):
-            #        print "      template len", len(cur_node.log_templates)
-            #        print "      rep_logs len", len(cur_node.rep_logs)
-            #        if cur_node.log_templates[i]["template"]=="To_be_deleted":
-            #            del cur_node.log_templates[i]
-            #            del cur_node.rep_logs[i]
-            #        print "         template len", len(cur_node.log_templates)
-            #        print "         rep_logs len", len(cur_node.rep_logs)
-            #del_marked = False
 
             removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates))
             if removed_count==0:
@@ -2829,6 +2821,14 @@ if __name__ == '__main__':
             #    print "["+format(len(cur_node.log_templates),'3d')+"]", format(cur_node.all_vect.count(-1),'5d'), format(removed_count,'4d'), log_template
             #print "["+format(len(cur_node.log_templates),'3d')+"]", format(cur_node.all_vect.count(-1),'5d'), format(removed_count,'4d'), log_template
             #print "\""+re.sub("\"","\\\"",log_template)+"\","
+            # Transfer logs from merged templates to the new template index.
+            previously_matched_count = 0
+            for j in range(0,len(cur_node.all_vect)):
+                if cur_node.all_vect[j] in merged_template_indices:
+                    cur_node.all_vect[j] = len(cur_node.log_templates)
+                    previously_matched_count += 1
+
+            removed_count += previously_matched_count
             print(len(cur_node.log_templates), removed_count, "\033[0;34m"+log_template+"\033[0m")
 
             #sys.exit(0)
