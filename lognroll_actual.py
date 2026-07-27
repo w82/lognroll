@@ -2377,6 +2377,9 @@ def _evaluate_leaf(leaf_node, score_cache, pair_cache):
                 "template":str(t["template"]),
             })
 
+    if len(selected)==0:
+        return None
+
     score_key = tuple((t["count"],t["template"]) for t in selected)
     if score_cache is not None and score_key in score_cache:
         SL,CPL = score_cache[score_key]
