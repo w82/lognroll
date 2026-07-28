@@ -510,35 +510,30 @@ def follows_format(klist):
     if len(keylist)<2:
         return False
 
-    # check if there is any common characters
+    # Build a regex that preserves the shared character structure.
     seedkey = keylist[0]
     smask = ""
     fixed_count = 0
     for c in range(0,slen):
         pos_fixed = True
+        all_digits = seedkey[c].isdigit()
+        all_alpha = seedkey[c].isalpha()
         for w in keylist[1:]:
             if w[c]!=seedkey[c]:
                 pos_fixed = False
-                break
+            if not w[c].isdigit():
+                all_digits = False
+            if not w[c].isalpha():
+                all_alpha = False
         if pos_fixed:
             fixed_count += 1
-            smask = smask + seedkey[c]
+            smask = smask + regex.escape(seedkey[c])
+        elif all_digits:
+            smask = smask + "\\d"
+        elif all_alpha:
+            smask = smask + "[A-Za-z]"
         else:
-            smask = smask + "."
-
-#    smask = re.sub("[0-9]","dd",smask)
-
-    smask = regex.sub("[0-9]","\d",smask)
-
-# The above code does not work on Python 3, so we modified it to code that does not use re module
-
-    # s = []
-    # for ch in smask:
-    #   if ch in "0123456789":
-    #        s.append('\d')
-    #    else:
-    #        s.append(ch)
-    # smask = "".join(s)
+            return False
 
     if fixed_count==0:
         return False
@@ -709,6 +704,10 @@ common_patterns = [
         "serial": "1",
         "prefix":"https_url" },
 
+#    {   "pattern": "[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+",
+#        "serial": "1",
+#        "prefix":"email" },
+
     {   "pattern": "http://([a-zA-Z0-9_\-\.]+):([0-9]+)(/[a-zA-Z0-9_\-\.\*\+\-]+)+",
         "serial": "1",
         "prefix":"http_url" },
@@ -716,6 +715,10 @@ common_patterns = [
     {   "pattern": "/(var|tmp|home|usr|home|etc|opt|gogo|airwordcount|wikimean|wikimedian|wikistandarddeviation|cluster|jobhistory|node|ws)(/[a-zA-Z0-9_\-\.\*\+\-]+)+",
         "serial": "1",
         "prefix":"file_path" },
+
+#    {   "pattern": "/(?:[a-zA-Z0-9_\-\.\*\+]+/)*[a-zA-Z0-9_\-\.\*\+]+",
+#        "serial": "1",
+#        "prefix":"file_path" },
 
     {   "pattern": "\d+\.\d+\.\d+\.\d+(:\d+)?", # IP address and port number
         "serial": "1",
@@ -965,13 +968,15 @@ def apply_all_patterns(tlogs):
     #print "    [apply_all_patterns()] Done converting. It took", elapsed, "seconds"
 
 
-# Just apply newly added pattern to the tokenized logs instead of going through
-# all the patters because regex takes time.
-def apply_new_patterns(tlogs):
+# Apply custom patterns learned since next_pattern_index to the tokenized logs.
+def apply_new_patterns(tlogs, next_pattern_index):
     global tm002
-    # Convert known patterns in the token to a marker
-    #print "    [apply_new_patterns()] Converting tokens of the new known pattern to markers ..."
-    #print "    [apply_new_patterns()] Pattern:", standalone_patterns[-1]
+    global seqnum
+
+    if next_pattern_index >= len(discovered_patterns):
+        return next_pattern_index
+
+    compiled_patterns = [regex.compile("^"+p["pattern"]+"$") for p in discovered_patterns[next_pattern_index:]]
     tm_checkpt = time.time()
     for i in range(0,len(tlogs)):
         tlog = tlogs[i]
@@ -994,14 +999,17 @@ def apply_new_patterns(tlogs):
 #                tlogs[i][j] = re.sub("\*","~200~",word)
 #                word = tlogs[i][j]
 
-            p = standalone_patterns[-1] # just use the newly added pattern, no need to match all
-            matched = regex.match("^"+p["pattern"]+"$",word)
-            if matched!=None:
-                tlogs[i][j] = p["label"]
-                #print "\033[0;35m"+matched.group(0)+"\033[0m -->", tlogs[i][j]
+            for p in compiled_patterns:
+                matched = p.match(word)
+                if matched!=None:
+                    tlogs[i][j] = "~CP"+format(seqnum,'09d')+"~"
+                    seqnum += 1
+                    seqnum = seqnum % MOD_FACTOR
+                    break
     elapsed = time.time() - tm_checkpt
     tm002 += elapsed
     #print "    [apply_new_patterns()] Done converting. It took", elapsed, "seconds"
+    return len(discovered_patterns)
 
 
 def Determine_runlen_filter_word(token_d, tlogs, ftwords):
@@ -1077,7 +1085,8 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
         #print "\033[43;5m"+"WILDCARD because they are all numbers."+"\033[0m"
         return '*', pv, cr
 
-    if follows_format(list(token_d.keys())):
+    is_custom_pattern_marker = all(token.startswith('~CP') and token.endswith('~') for token in token_d)
+    if not is_custom_pattern_marker and follows_format(list(token_d.keys())):
         if debug_mode:
             print("    \033[43;5m"+"WILDCARD because new pattern is detected."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because new pattern is detected."+"\033[0m"
@@ -1099,7 +1108,8 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
         return '*', pv, cr
 
     token =  sorted(token_d, key=lambda k: token_d[k], reverse=True)[0]
-    if '~' in token.replace('~200~', ''):
+    # A custom-pattern marker is converted to a wildcard during final template generation.
+    if '~' in token.replace('~200~', '') and not token.startswith('~CP'):
         if debug_mode:
             print("    \033[43;5m"+"WILDCARD because it is a known pattern."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because it is a known pattern."+"\033[0m"
@@ -1783,7 +1793,7 @@ def Generate_log_template(fwords):
 def generate_log_template_star(fwords,realcall):
 
     search_patterns = [
-                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+)( |_|:|>|,|\]|\)|/|\"|$)",       "type":"int" },  # int
+                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+)( |_|:|>|,|\]|\)|\(|/|\"|$)",       "type":"int" },  # int
 
 #                        { "pattern":"_\-?\d+",       "type":"int" },  # int
 #                        { "pattern":"\-?\d+_",       "type":"int" },  # int
@@ -2692,6 +2702,7 @@ if __name__ == '__main__':
     tree = Tree()
     tree.create_node("TOP", len(raw_logs), "top")
     cur_node = tree.find_inprogress_node()
+    next_pattern_index = len(discovered_patterns)
 
     runtime_checkpt = time.time()
     #while all_vect.count(-1)>0:
@@ -2725,6 +2736,7 @@ if __name__ == '__main__':
 
     
         candidate_set = construct_candidate_log_templates(tokenized_logs,cur_node.rep_logs) # returns a list of candidate log templates
+        next_pattern_index = apply_new_patterns(all_tlogs, next_pattern_index)
 
 #        log_template = candidate_set[0]
 #        removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates))
