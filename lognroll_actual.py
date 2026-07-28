@@ -411,7 +411,7 @@ def are_all_numbers(numlist):
 # included code 2024-03-20
 def is_include_percentage(tok):
 
-    if regex.match(r'[\d\w\W\s]*\d+\.\d+%[\d\w\W\s]*', tok):
+    if regex.match(r'[\d\w\W\s]*\d+(?:\.\d+)?%[\d\w\W\s]*', tok):
         return True
     return False
 
@@ -2158,8 +2158,12 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 #            print("pv: " + str(pv))
 
             if new_fword=="*":
-                if pv<UNIFORM_THRESHOLD:
-                    filter_words,filter_mask = finalize_filter_with_star(filter_words,filter_mask)
+                # Handle wildcards not caused by the p-value test.
+                if pv<(1.0 + UNIFORM_THRESHOLD) / 2.0:
+                    filter_mask[max_runlen_pos] = 1
+                    filter_words[max_runlen_pos] = "*"
+                    token_added_order.append("*")
+                    count_added_order.append(len(target_dict))
                 else:
                     tw,tm = finalize_filter_with_star(filter_words,filter_mask)
                     log_template = generate_log_template_star(tw,False)
@@ -2171,23 +2175,23 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 
             else:
                 if pv > UNIFORM_THRESHOLD - UNIFORM_EPSILON and pv <= (1.0 + UNIFORM_THRESHOLD) / 2.0:
-                    if add_candidate==False:
-                        add_candidate = True
+                    add_candidate = True
                 else:
-                    pass
+                    add_candidate = False
 
                 if add_candidate:
                     tw,tm = finalize_filter_with_star(filter_words,filter_mask)
                     log_template = generate_log_template_star(tw,False)
                     #print "log template:", log_template
                     #print "\033[1;95mCandidate:", "\033[0m \033[90;102m", "".join(tw), "\033[0m "
-                    if exist_match(log_template, rep_logs)<0:
+
+                    # Avoid duplicate candidates in the same batch (e.g., "prefix .*" can be generated twice).
+                    if exist_match(log_template, rep_logs)<0 and log_template not in candidate_set:
                         candidate_set.append(log_template)
                         #print "\033[1;94mCandidate ACCEPTED", "\033[0m ", "\033[1;95mCandidate:", "\033[0m \033[90;102m", "".join(tw), "\033[0m "
                     else:
                         #print "\033[1;91mCandidate REJECTED", "\033[0m ","\033[1;95mCandidate:", "\033[0m \033[90;102m", "".join(tw), "\033[0m "
                         pass
-                    add_candidate = False
 
             if new_fword!="*": 
                 filter_mask[max_runlen_pos] = 1
@@ -2231,7 +2235,9 @@ def construct_candidate_log_templates(input_logs, rep_logs):
         template_words = template_words[:template_words.index(MISSING_TOKEN)]
     log_template = generate_log_template_star(template_words,True)
 
-    candidate_set.append(log_template)
+    # Avoid duplicate candidates in the same batch (e.g., "prefix .*" can be generated twice).
+    if log_template not in candidate_set:
+        candidate_set.append(log_template)
 
     return candidate_set
 
