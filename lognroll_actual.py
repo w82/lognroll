@@ -2231,8 +2231,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
                     #print "log template:", log_template
                     #print "\033[1;95mCandidate:", "\033[0m \033[90;102m", "".join(tw), "\033[0m "
 
-                    # Avoid duplicate candidates in the same batch (e.g., "prefix .*" can be generated twice).
-                    if exist_match(log_template, rep_logs)<0 and log_template not in candidate_set:
+                    if exist_match(log_template, rep_logs)<0:
                         candidate_set.append(log_template)
                         #print "\033[1;94mCandidate ACCEPTED", "\033[0m ", "\033[1;95mCandidate:", "\033[0m \033[90;102m", "".join(tw), "\033[0m "
                     else:
@@ -2281,9 +2280,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
         template_words = template_words[:template_words.index(MISSING_TOKEN)]
     log_template = generate_log_template_star(template_words,True)
 
-    # Avoid duplicate candidates in the same batch (e.g., "prefix .*" can be generated twice).
-    if log_template not in candidate_set:
-        candidate_set.append(log_template)
+    candidate_set.append(log_template)
 
     # Identical templates represent the same Tree branch.
     return list(dict.fromkeys(candidate_set))
