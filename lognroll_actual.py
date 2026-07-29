@@ -2327,19 +2327,16 @@ def _pair_lcs_length_sum(template_a, template_b, pair_cache):
 
 # logtem is a list of 'count','template' dict with tokenized static templates
 def compute_slcpl(logtem, pair_cache):
-    selected = copy.deepcopy(logtem)
+    selected = []
+    for t in logtem:
+        selected.append({
+            "count": t["count"],
+            "template": [s for s in t["template"] if s != " "],
+        })
 
     SL_sum = 0
     total_log_count = 0 
     for t in selected:
-
-        u = []
-        for s in t['template']:
-            if s==" ":
-                continue
-            u.append(s)
-        t['template'] = u
-
         static_length = len(t['template'])
         #print "  \033[1;94m", static_length, "\033[0m", "\033[33;36m","".join(t['template']), "\033[0m"
         SL_sum += (static_length * t['count'])
@@ -2388,7 +2385,7 @@ def compute_slcpl(logtem, pair_cache):
 
 
 
-def _evaluate_leaf(leaf_node, score_cache, pair_cache):
+def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
     # Keep valid templates from this leaf for scoring.
     selected = []
     for t in leaf_node.log_templates:
@@ -2403,7 +2400,7 @@ def _evaluate_leaf(leaf_node, score_cache, pair_cache):
     if len(selected)==0:
         return None
 
-    score_key = tuple((t["count"],t["template"]) for t in selected)
+    score_key = tuple(sorted((t["count"],t["template"]) for t in selected))
     if score_cache is not None and score_key in score_cache:
         SL,CPL = score_cache[score_key]
     else:
@@ -2411,9 +2408,13 @@ def _evaluate_leaf(leaf_node, score_cache, pair_cache):
         scoring_templates = []
         for t in selected:
             template = t['template']
+            if template not in scoring_token_cache:
+                scoring_token_cache[template] = tuple(
+                    do_tokenization([template.replace(".*","")])[0]
+                )
             scoring_templates.append({
                 "count":t["count"],
-                "template":do_tokenization([template.replace(".*","")])[0],
+                "template":scoring_token_cache[template],
             })
 
         # Compute the SL and CPL scores for this leaf.
@@ -2446,6 +2447,7 @@ def _select_best_leaf(tree):
     best_result = None
     score_cache = {}
     pair_cache = {}
+    scoring_token_cache = {}
     for leaf_index, leaf_node in enumerate(leaf_nodes):
 
         print(
@@ -2457,6 +2459,7 @@ def _select_best_leaf(tree):
             leaf_node,
             score_cache,
             pair_cache,
+            scoring_token_cache,
         )
         if result is None:
             print("Skipping leaf with no effective templates:", leaf_node.name)
