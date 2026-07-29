@@ -13,7 +13,7 @@ import argparse
 import pickle
 from scipy import stats
 from random import randint
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 
 global debug_mode
@@ -76,6 +76,7 @@ class Node:
         self.log_templates = []
         self.rep_logs = []
         self.all_vect = [-1]*log_count
+        self.score_counts = None
 
     @property
     def identifier(self):
@@ -1207,7 +1208,7 @@ def test_multiple_match(rlogs, vect, log_template):
     return cnt, to_delete
 
 
-def mark_matched_logs(logs, vect, rlogs, log_template, i):
+def mark_matched_logs(logs, vect, rlogs, log_template, i, score_counts=None, log_scores=None):
 #    print('Here is mark_matched_logs')
     # very long spark log have trouble at this function, so we must check.
 #    print('logs: ')
@@ -1232,6 +1233,12 @@ def mark_matched_logs(logs, vect, rlogs, log_template, i):
         if matched!=None:
             vect[j] = i
             marked += 1
+
+            if score_counts is not None:
+                score = log_scores[j]
+                score_counts[score] -= 1
+                if score_counts[score] == 0:
+                    del score_counts[score]
 
             if not replog_selected:
                 replog_selected = True
@@ -1321,46 +1328,46 @@ def sample_by_length(logs, vect, ssize):
     sys.exit(0)
 
 
-def sample_by_token_length_and_space_count(logs, tlogs, vect):
+def build_log_scores(logs):
+    scores = []
+    for log in logs:
+        token_count = len(log.split())
+        space_count = log.count(' ') + log.count('\t') + log.count(',') + log.count(':') + log.count(';') + log.count(',')
+        scores.append(token_count*1000 + space_count)
+    return scores
+
+
+def build_log_score_index(log_scores):
+    score_indices = defaultdict(list)
+    for i, score in enumerate(log_scores):
+        score_indices[score].append(i)
+    return score_indices
+
+
+def sample_by_token_length_and_space_count(logs, tlogs, vect, log_scores, score_counts, score_indices):
     global tm006
     tm_checkpt = time.time()
 
-    logscore_d = defaultdict()
-    tlog_d = defaultdict()
-    for i in range(0,len(logs)):
-        if vect[i]>-1: 
-            continue
-        log = logs[i]
-        tlog = tlogs[i]
-
-        toklen = len(log.split())
-        space_cnt = log.count(' ') + log.count('\t') + log.count(',') + log.count(':') + log.count(';') + log.count(',')
-        score = toklen*1000+space_cnt
-
-        if score not in logscore_d:
-            logscore_d[score]= []
-        logscore_d[score].append(log)
-        if score not in tlog_d:
-            tlog_d[score]= []
-        tlog_d[score].append(tlog)
-    most_popular = sorted(logscore_d, key=lambda k: len(logscore_d[k]), reverse=True)[0]
+    most_popular = max(score_counts, key=score_counts.get)
 
     if debug_mode:
         print("** Summary of log groups using characters **")
-        for x in sorted(logscore_d, key=lambda k: len(logscore_d[k]), reverse=True)[:20]:
-            print("  For the key of",format(x,'5d')+",", format(len(logscore_d[x]), '5d'),"logs are grouped.")
+        for score in sorted(score_counts, key=score_counts.get, reverse=True)[:20]:
+            print("  For the key of",format(score,'5d')+",", format(score_counts[score], '5d'),"logs are grouped.")
         print("    ...")
 
     selected = []
-    for log in logscore_d[most_popular]:
-        selected.append(log)
-        if len(selected)>=1000:
-            break
     tselected = []
-    for tlog in tlog_d[most_popular]:
-        tselected.append(tlog)
-        if len(tselected)>=1000:
-            break
+    if score_indices is not None:
+        indices = score_indices[most_popular]
+    else:
+        indices = range(len(log_scores))
+    for i in indices:
+        if vect[i]==-1 and log_scores[i]==most_popular:
+            selected.append(logs[i])
+            tselected.append(tlogs[i])
+            if len(selected)>=1000:
+                break
 
     elapsed = time.time() - tm_checkpt
     #print "{0:.3f}".format(elapsed), "Random log selection"
@@ -2699,8 +2706,16 @@ if __name__ == '__main__':
     #            print "   \033[1;34m","("+str(cnt)+")", "".join(x), "\033[0m "
     #            cnt += 1
 
+    # Maps each log index to its immutable score.
+    # Example: all_log_scores[7] == 3004; mark_matched_logs() decrements score_counts[3004].
+    all_log_scores = build_log_scores(all_logs)
+    # Maps each score to its original log indices.
+    # Example: all_log_score_indices[3004] == [1, 7]; sampling uses it for most_popular.
+    all_log_score_indices = build_log_score_index(all_log_scores)
+
     tree = Tree()
-    tree.create_node("TOP", len(raw_logs), "top")
+    root_node = tree.create_node("TOP", len(raw_logs), "top")
+    root_node.score_counts = dict(Counter(all_log_scores))
     cur_node = tree.find_inprogress_node()
     next_pattern_index = len(discovered_patterns)
 
@@ -2708,7 +2723,7 @@ if __name__ == '__main__':
     #while all_vect.count(-1)>0:
     while -1 in cur_node.all_vect:
 
-        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(all_logs, all_tlogs, cur_node.all_vect)
+        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(all_logs, all_tlogs, cur_node.all_vect, all_log_scores, cur_node.score_counts, all_log_score_indices)
         #sampled_logs = random_sample_logs(all_logs, RANDOM_SAMPLE_SIZE)
         #sampled_logs = sample_by_length(all_logs, all_vect, RANDOM_SAMPLE_SIZE)
         #sampled_logs = sample_by_signature(all_logs, RANDOM_SAMPLE_SIZE)
@@ -2768,11 +2783,12 @@ if __name__ == '__main__':
                 new_node.log_templates = copy.deepcopy(cur_node.log_templates)
                 new_node.rep_logs = copy.deepcopy(cur_node.rep_logs)
                 new_node.all_vect = copy.deepcopy(cur_node.all_vect)
+                new_node.score_counts = dict(cur_node.score_counts)
 
                 new_node.print_node()
     
                 # Mark matched logs from all_logs using new log template. 
-                removed_count = mark_matched_logs(all_logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates))
+                removed_count = mark_matched_logs(all_logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates), new_node.score_counts, all_log_scores)
                 if removed_count==0:
                     print("\n\033[1;94mWARNING[1]:\033[0m No logs removed from the template!")
                     print("TEMPLATE->",log_template)
@@ -2824,7 +2840,7 @@ if __name__ == '__main__':
                         cur_node.log_templates[i]=None
                         cur_node.rep_logs[i]=None
 
-            removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates))
+            removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates), cur_node.score_counts, all_log_scores)
             if removed_count==0:
                 print("\n\033[1;95mWARNING[2]:\033[0m \033[1;31mNo logs removed from the template!", "\033[0m")
                 print("   *TEMPLATE->",log_template)
