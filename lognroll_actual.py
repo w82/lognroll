@@ -2256,7 +2256,8 @@ def construct_candidate_log_templates(input_logs, rep_logs):
     if log_template not in candidate_set:
         candidate_set.append(log_template)
 
-    return candidate_set
+    # Identical templates represent the same Tree branch.
+    return list(dict.fromkeys(candidate_set))
 
 
 # Longest common subsequence
@@ -2783,9 +2784,9 @@ if __name__ == '__main__':
     
                 new_node = tree.find_node(new_identifier)
                 # copy internal state
-                new_node.log_templates = copy.deepcopy(cur_node.log_templates)
-                new_node.rep_logs = copy.deepcopy(cur_node.rep_logs)
-                new_node.all_vect = copy.deepcopy(cur_node.all_vect)
+                new_node.log_templates = list(cur_node.log_templates)
+                new_node.rep_logs = list(cur_node.rep_logs)
+                new_node.all_vect = list(cur_node.all_vect)
                 new_node.score_counts = dict(cur_node.score_counts)
 
                 new_node.print_node()
