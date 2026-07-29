@@ -587,50 +587,64 @@ def print_correlation(bow,v,w1,w2):
 
 standalone_patterns = [
 #    {   "pattern":"\-?\d+",          # integer
-#        "label": "~100~" },
+#        "label": "~100~",
+#        "matcher": None },
 #    {   "pattern":"\-?\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in integer value
-#        "label": "~101~" },
+#        "label": "~101~",
+#        "matcher": None },
 #    {   "pattern": "\-?\d+\.\d+",     # FP num
-#        "label": "~102~" },
+#        "label": "~102~",
+#        "matcher": None },
 #    {   "pattern":"\-?\d+\.\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in FP value
-#        "label": "~103~" },
+#        "label": "~103~",
+#        "matcher": None },
 #    {   "pattern": "\-?\d+\.\d+%",     # FP percent
-#        "label": "~104~" },
+#        "label": "~104~",
+#        "matcher": None },
 #    {   "pattern":"\d+\^\d+",         # exponent
-#        "label": "~105~" },
+#        "label": "~105~",
+#        "matcher": None },
 #    {   "pattern": "0x[\da-f]+",   # hexa num
-#        "label": "~106~" },
+#        "label": "~106~",
+#        "matcher": None },
 #    {   "pattern": "155\.230\.91\.\\d{3}(:\\d)?",   # IP and port
-#        "label": "~107~" },
+#        "label": "~107~",
+#        "matcher": None },
 
     {   "pattern":"[\da-zA-Z]{8}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{12}", # UUID format
-        "label": "~108~" },
-#    {'pattern': 'container_\\d{13}_\\d{4}_\\d{2}_\\d{6}', 'label': '~109~'},
-#    {'pattern': 'blk_\\d{10}_\\d{4}', 'label': '~110~'},
-#    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~111~'},
-#    {'pattern': 'DFSClient_NONMAPREDUCE_\-?\\d+_\\d', 'label': '~112~'},
-#    {'pattern': 'DFSClient_attempt_\\d+_\\d{4}_._000000_0_\\d+_1', 'label': '~113~'},
-#    {'pattern': 'fsimage.ckpt_\\d{19}', 'label': '~114~'},
-#    {'pattern': 'BP\-\\d{9}\-\\d+.\\d+.\\d+.\\d+\-\\d{13}', 'label': '~115~'},
-#    {'pattern': 'appattempt_\\d{13}_\\d{4}_\\d{6}', 'label': '~116~'},
-#    {'pattern': 'job_\\d{13}_\\d{4}', 'label': '~117~'},
+        "label": "~108~",
+        "matcher": None },
+#    {'pattern': 'container_\\d{13}_\\d{4}_\\d{2}_\\d{6}', 'label': '~109~', 'matcher': None},
+#    {'pattern': 'blk_\\d{10}_\\d{4}', 'label': '~110~', 'matcher': None},
+#    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~111~', 'matcher': None},
+#    {'pattern': 'DFSClient_NONMAPREDUCE_\-?\\d+_\\d', 'label': '~112~', 'matcher': None},
+#    {'pattern': 'DFSClient_attempt_\\d+_\\d{4}_._000000_0_\\d+_1', 'label': '~113~', 'matcher': None},
+#    {'pattern': 'fsimage.ckpt_\\d{19}', 'label': '~114~', 'matcher': None},
+#    {'pattern': 'BP\-\\d{9}\-\\d+.\\d+.\\d+.\\d+\-\\d{13}', 'label': '~115~', 'matcher': None},
+#    {'pattern': 'appattempt_\\d{13}_\\d{4}_\\d{6}', 'label': '~116~', 'matcher': None},
+#    {'pattern': 'job_\\d{13}_\\d{4}', 'label': '~117~', 'matcher': None},
 #
-    {'pattern': 'req\-[a-z0-9]{8}\-[a-z0-9]{4}\-[a-z0-9]{4}\-[a-z0-9]{4}\-[a-z0-9]{12}', 'label': '~115~'},
+    {'pattern': 'req\-[a-z0-9]{8}\-[a-z0-9]{4}\-[a-z0-9]{4}\-[a-z0-9]{4}\-[a-z0-9]{12}', 'label': '~115~', 'matcher': None},
 
-#    {'pattern': 'DFSClient_NONMAPREDUCE_\-\\d{9}_\\d', 'label': '~111~'},
-#    {'pattern': 'DFSClient_attempt_\\d{13}_\\d{4}_r_\\d{6}_\\d_\\d{9}_\\d', 'label': '~112~'},
-#    {'pattern': 'edits_tmp_\\d{19}-\\d{19}_\\d{19}', 'label': '~113~'},
-#    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~114~'},
-#    {'pattern': 'appattempt_\\d\\d\\d\\d\\d........_\\d\\d\\d\\d_\\d\\d\\d\\d\\d\\d', 'label': '~116~'},
-#    {'pattern': 'deimos\\d.', 'label': '~117~'},
-#    {'pattern': 'job_\\d\\d\\d\\d........._\\d\\d\\d\\d', 'label': '~119~'},
-#    {'pattern': '\\d\\d\\d.\\d\\d\\d.\\d\\d.\\d\\d.', 'label': '~121~'},
-#    {'pattern': '#\\d\\d....', 'label': '~122~'},
-#    {'pattern': '\\d.\\d.s', 'label': '~123~'},
-#    {'pattern': 'DS-........-....-\\d...-....-............', 'label': '~124~'},
-#    {'pattern': 'masterappattempt_\\d\\d\\d\\d........._\\d\\d\\d\\d_\\d\\d\\d\\d\\d\\d', 'label': '~125~'},
+#    {'pattern': 'DFSClient_NONMAPREDUCE_\-\\d{9}_\\d', 'label': '~111~', 'matcher': None},
+#    {'pattern': 'DFSClient_attempt_\\d{13}_\\d{4}_r_\\d{6}_\\d_\\d{9}_\\d', 'label': '~112~', 'matcher': None},
+#    {'pattern': 'edits_tmp_\\d{19}-\\d{19}_\\d{19}', 'label': '~113~', 'matcher': None},
+#    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~114~', 'matcher': None},
+#    {'pattern': 'appattempt_\\d\\d\\d\\d\\d........_\\d\\d\\d\\d_\\d\\d\\d\\d\\d\\d', 'label': '~116~', 'matcher': None},
+#    {'pattern': 'deimos\\d.', 'label': '~117~', 'matcher': None},
+#    {'pattern': 'job_\\d\\d\\d\\d........._\\d\\d\\d\\d', 'label': '~119~', 'matcher': None},
+#    {'pattern': '\\d\\d\\d.\\d\\d\\d.\\d\\d.\\d\\d.', 'label': '~121~', 'matcher': None},
+#    {'pattern': '#\\d\\d....', 'label': '~122~', 'matcher': None},
+#    {'pattern': '\\d.\\d.s', 'label': '~123~', 'matcher': None},
+#    {'pattern': 'DS-........-....-\\d...-....-............', 'label': '~124~', 'matcher': None},
+#    {'pattern': 'masterappattempt_\\d\\d\\d\\d........._\\d\\d\\d\\d_\\d\\d\\d\\d\\d\\d', 'label': '~125~', 'matcher': None},
 ]
 
+# These patterns are checked for every token in each sampled log.
+for pattern in standalone_patterns:
+    pattern["matcher"] = regex.compile("^"+pattern["pattern"]+"$")
+
+date_matcher = regex.compile("^(\\d{4})\-(\\d{2})\-(\\d{2})$")
 
 # This list grows as we learn more patterns.
 discovered_patterns = [
@@ -779,7 +793,7 @@ def replace_known_patterns(tlogs):
                 w = tlogs[i][j]
 
             for pat in standalone_patterns:
-                matched = regex.match("^"+pat["pattern"]+"$",w)
+                matched = pat["matcher"].match(w)
                 if matched!=None:
 
                     #tlogs[i][j] = pat["label"]
@@ -790,7 +804,7 @@ def replace_known_patterns(tlogs):
                     #print "\033[0;35m"+matched.group(0)+"\033[0m -->", tlogs[i][j]
 
             is_date = True
-            matched = regex.match("^(\\d{4})\-(\\d{2})\-(\\d{2})$",w)
+            matched = date_matcher.match(w)
             if matched!=None:
                 year = matched.group(1)
                 month = matched.group(2)
@@ -813,48 +827,62 @@ number_patterns = [
 #    {   "pattern": "\d+\.\d+\.\d+\.\d+(:\d)?", # IP address and port number
 #        "type":"ipaddrport",
 #        "increment":"1",
-#        "serial":"1"},
+#        "serial":"1",
+#        "matcher": None},
 
     {   "pattern":"\-?\d+",          # integer
         "type":"int",
         "increment":"1",
-        "serial": "1" },
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern": "\-?\d+\.\d+",     # FP num
         "type":"float",
         "increment":"1",
-        "serial": "1" },
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern":"\-?\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in integer value
         "type":"int_time",
         "increment":"1",
-        "serial": "1" },
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern":"\-?\d+\.\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in FP value
         "type":"float_time",
         "increment":"1",
-        "serial": "1" },
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern":"\-?\d+\^\d+", # exponent
         "type":"exponent",
         "increment":"1",
-        "serial": "1" },
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern": "0x[\da-fA-F]+", # hexa num
         "type":"hexa1", 
         "increment":"1", # not used
-        "serial": "1" }, # not used
+        "serial": "1", # not used
+        "matcher": None },
 
     {   "pattern": "[\da-fA-F]+",   # hexa num
         "type":"hexa2", 
         "increment":"1", # not used
-        "serial": "1" }, # not used
+        "serial": "1", # not used
+        "matcher": None },
 
 #    {   "pattern": "155\.230\.91\.\\d{3}(:\\d)?",   # IP and port
-#        "label": "~107~" },
+#        "label": "~107~",
+#        "matcher": None },
 #    {   "pattern":"[\da-zA-Z]{8}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{12}", # UUID format
-#        "label": "~108~" },
+#        "label": "~108~",
+#        "matcher": None },
 ]
+
+# Compile once: this matching loop runs for every token in the input corpus.
+for pattern in number_patterns:
+    pattern["matcher"] = regex.compile("^"+pattern["pattern"]+"$")
 
 
 def uniquify_numbers(tlogs):
@@ -869,8 +897,8 @@ def uniquify_numbers(tlogs):
                 w = tlogs[i][j]
 
             found = False
-            for p in number_patterns: 
-                matched = regex.match("^"+p["pattern"]+"$", w)
+            for p in number_patterns:
+                matched = p["matcher"].match(w)
                 if matched!=None:
                     found = True
                     break
@@ -959,7 +987,7 @@ def apply_all_patterns(tlogs):
                 word = tlogs[i][j]
 
             for p in standalone_patterns:
-                matched = regex.match("^"+p["pattern"]+"$",word)
+                matched = p["matcher"].match(word)
                 if matched!=None:
                     tlogs[i][j] = p["label"]
                     #print "\033[0;35m"+matched.group(0)+"\033[0m -->", tlogs[i][j]
@@ -1181,10 +1209,11 @@ def match_and_remove(tmpl,logs):
 
 
 def exist_match(log_template, logs):
+    template_matcher = regex.compile("^"+log_template+"$")
     for i in range(0,len(logs)):
         if logs[i]==None: 
             continue
-        matched = regex.match("^"+log_template+"$", logs[i])
+        matched = template_matcher.match(logs[i])
         if matched!=None:
             if debug_mode:
                 print("\033[0;32mMatch found at "+str(i)+":", logs[i], "\033[0m ")
@@ -1220,7 +1249,7 @@ def mark_matched_logs(logs, vect, rlogs, log_template, i, score_counts=None, log
     marked = 0 # how many logs match to the log template?
     replog_selected = False
 
-    log_template = log_template
+    template_matcher = regex.compile("^"+log_template+"$")
 
     for j in range(0,len(logs)):
 
@@ -1229,7 +1258,7 @@ def mark_matched_logs(logs, vect, rlogs, log_template, i, score_counts=None, log
 
         log = logs[j]
 
-        matched = regex.match("^"+log_template+"$",log)
+        matched = template_matcher.match(log)
         if matched!=None:
             vect[j] = i
             marked += 1
@@ -2106,7 +2135,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 
                 found = False
                 for p in number_patterns: 
-                    matched = regex.match("^"+p["pattern"]+"$", runlength_token)
+                    matched = p["matcher"].match(runlength_token)
                     if matched!=None:
                         found = True
                 if found:
