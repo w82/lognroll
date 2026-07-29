@@ -2483,30 +2483,19 @@ def _select_best_leaf(tree):
     return best_result
 
 
-def tokenize_log_template(s):
+template_token_cache = {}
 
-    s = regex.sub("\\\\","",s)
-    tok = custom_split(s)
+
+def tokenize_log_template(s):
+    if s in template_token_cache:
+        return list(template_token_cache[s])
+
+    tok = custom_split(regex.sub("\\\\","",s))
     for y in range(0,len(tok)):
         if '~' in tok[y]:
             tok[y]=".*"
-    return tok
-
-
-def escape_log_template(s):
-    s = regex.sub("\\\\","\\\\\\\\",s )
-    s = regex.sub("\-","\-",s)
-    s = regex.sub("\[","\[",s)
-    s = regex.sub("\]","\]",s)
-    s = regex.sub("\(","\(",s)
-    s = regex.sub("\)","\)",s)
-    s = regex.sub("\$","\$",s)
-    s = regex.sub("\?","\?",s)
-    s = regex.sub("\+","\+",s)
-    s = regex.sub("\|","\|",s)
-    s = regex.sub(r"\{", r"\\{", s)
-    s = regex.sub(r"\}", r"\\}", s)
-    return s
+    template_token_cache[s] = tok
+    return list(template_token_cache[s])
 
 
 
@@ -2837,7 +2826,7 @@ if __name__ == '__main__':
                         print("   Token to update:", tok_candi[diff_loc])
                         print("   Token to update:", tok_logtm[diff_loc])
                         tok_logtm[diff_loc]=".*"
-                        log_template = escape_log_template("".join(tok_logtm))
+                        log_template = "".join(".*".join(regex.escape(part) for part in token.split(".*")) for token in tok_logtm)
                         tok_candi = tokenize_log_template(log_template)
                         print("   New log_template:", log_template)
                         merged_template_indices.append(i)
