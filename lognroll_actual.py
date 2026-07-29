@@ -719,9 +719,9 @@ common_patterns = [
         "serial": "1",
         "prefix":"https_url" },
 
-#    {   "pattern": "[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+",
-#        "serial": "1",
-#        "prefix":"email" },
+    {   "pattern": "[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+",
+        "serial": "1",
+        "prefix":"email" },
 
     {   "pattern": "http://([a-zA-Z0-9_\-\.]+):([0-9]+)(/[a-zA-Z0-9_\-\.\*\+\-]+)+",
         "serial": "1",
@@ -731,9 +731,9 @@ common_patterns = [
         "serial": "1",
         "prefix":"file_path" },
 
-#    {   "pattern": "/(?:[a-zA-Z0-9_\-\.\*\+]+/)*[a-zA-Z0-9_\-\.\*\+]+",
-#        "serial": "1",
-#        "prefix":"file_path" },
+    {   "pattern": "(?<![a-zA-Z0-9_\-\.\*\+])/(?:[a-zA-Z0-9_\-\.\*\+]+/)*[a-zA-Z0-9_\-\.\*\+]+",
+        "serial": "1",
+        "prefix":"file_path" },
 
     {   "pattern": "\d+\.\d+\.\d+\.\d+(:\d+)?", # IP address and port number
         "serial": "1",
