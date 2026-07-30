@@ -2620,126 +2620,24 @@ processed_count=0
 reuse_filename="CODE50_REUSE.p"
 reuse_logfilename="CODE50_REUSE_LOG.p"
 
-if __name__ == '__main__':
+# Discovery execution backend.  Keep multiprocessing coordination in this
+# section so the CLI, candidate construction, matching, and leaf scoring stay
+# independent of the execution strategy.
+def run_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode):
+    """Run template discovery with the selected execution strategy.
 
-    # global debug_mode
-    global new_pattern_added
-    debug_mode = False
-
-    openfile_list = []
-    try:
-        parser = argparse.ArgumentParser(description="")
-        parser.add_argument('--logfile',  type=argparse.FileType('r'), nargs='+', required=True, help='List of one or more input log files')
-        parser.add_argument('--debug',  action='store_true', required=False, help='When specified, it walks through each log processing and print out messages.')
-        parser.add_argument('--linear',  action='store_true', required=False, help='Whether to follow linear execution path along the tree or not.')
-        # Now, we don't need clean mode
-        parser.add_argument('--clean',  action='store_true', required=False, help='When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.')
-
-        args = parser.parse_args()
-        args.clean = True
-        openfile_list = args.logfile
-        if len(openfile_list)>1:
-            print("Specify only one log file. Currently",len(openfile_list),"are given.")
-            sys.exit(0)
-
-        debug_mode = False
-        if args.debug==False:
-            debug_mode = False
-        else:
-            debug_mode = bool(args.debug)
-        
-        linear_mode = False
-        if args.linear==False:
-            linear_mode = False
-        else: 
-            linear_mode = bool(args.linear)
-            
-        if os.path.exists(reuse_logfilename):
-            prev_reuse_logfilename = pickle.load(open(reuse_logfilename,"r"))
-        else:
-            prev_reuse_logfilename = "-" 
-
-        print("** Previous log file:",prev_reuse_logfilename)
-        print("**    Input log file:",openfile_list[0].name)
-
-        clean_mode = False
-        if args.clean==False:
-            if prev_reuse_logfilename==openfile_list[0].name:
-               clean_mode = False
-               print("\033[2;102mNon-Clean (cache reuse, fast) mode\033[0m")
-            else:
-                print("\033[31;91mAlthough you wanted FAST REUSE mode, the input log file is different from the previous run. Forcing clean mode ... \033[0m")
-                print("\033[37;101mClean (slow) mode\033[0m")
-                clean_mode = True
-                os.remove(reuse_logfilename)
-                pickle.dump(openfile_list[0].name, open(reuse_logfilename,"w"))
-        else:
-            print("\033[37;101mClean (slow) mode\033[0m")
-            clean_mode = bool(args.clean)
+    The current backend is sequential.  The parallel branch scheduler will be
+    added beside this function and selected here without changing main().
+    """
+    return _run_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode)
 
 
-    except Exception as e:
-        print(('Error: %s' % str(e)))
-
-    print("Loading all logs into memory.")
-    raw_logs = read_log_files( openfile_list, None ) 
-
-    old_log_count = len(raw_logs)
-    rep_logs = remove_log_template_matches(raw_logs, prepopulated_log_templates)
-    print("==================================================================================================================================")
-    print("Old Log count:",old_log_count)
-    print("New Log count:",len(raw_logs))
-    print("Prepopulated log template count:", len(prepopulated_log_templates))
-    print("Representative logs count:", len(rep_logs))
-    log_templates = copy.deepcopy(prepopulated_log_templates)
-
-    print("Preprocessing logs...")
-    all_logs = preprocess_known_patterns(raw_logs) 
-                                                   
-
-    if clean_mode:
-        if os.path.exists(reuse_filename):
-            os.remove(reuse_filename)
-
-    if os.path.exists(reuse_filename):
-        print("Reusing reuse file ...")
-        all_tlogs = pickle.load(open(reuse_filename,"rb"))
-    else:
-        print("Sequence number:", seqnum)
-        print("Tokenizing all logs.")
-        all_tlogs = do_tokenization(all_logs)
-        print("Done tokenizing.", len(all_logs))
-
-        #apply_all_patterns(all_tlogs)
-        print("Rearranging numbers of known patterns to make values unique ...")
-        uniquify_numbers(all_tlogs)
-        print("Done rearranging values.")
-        print("len(all_tlogs):",len(all_tlogs))
-
-        pickle.dump(all_tlogs, open(reuse_filename,"wb"))
-
-    #print " "
-    #if len(all_tlogs)<30:
-    #    cnt = 1
-    #    for x in all_tlogs:
-    #            print "   \033[1;34m","("+str(cnt)+")", "".join(x), "\033[0m "
-    #            cnt += 1
-
-    # Maps each log index to its immutable score.
-    # Example: all_log_scores[7] == 3004; mark_matched_logs() decrements score_counts[3004].
-    all_log_scores = build_log_scores(all_logs)
-    # Maps each score to its original log indices.
-    # Example: all_log_score_indices[3004] == [1, 7]; sampling uses it for most_popular.
-    all_log_score_indices = build_log_score_index(all_log_scores)
-
-    tree = Tree()
-    root_node = tree.create_node("TOP", len(raw_logs), "top")
-    root_node.score_counts = dict(Counter(all_log_scores))
+def _run_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode):
+    """Run the existing Tree-based Sequential Covering search to completion."""
     cur_node = tree.find_inprogress_node()
     next_pattern_index = len(discovered_patterns)
-
     runtime_checkpt = time.time()
-    #while all_vect.count(-1)>0:
+
     while -1 in cur_node.all_vect:
 
         sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(all_logs, all_tlogs, cur_node.all_vect, all_log_scores, cur_node.score_counts, all_log_score_indices)
@@ -2910,9 +2808,111 @@ if __name__ == '__main__':
         #print "============================================================================================================="
         #raw_input("\033[1;94m->Press ENTER to continue ...\033[0m")
 
-    # END of outer while loop - done removing all the logs
-    discovery_elapsed = time.time() - runtime_checkpt
+    return time.time() - runtime_checkpt
 
+
+if __name__ == '__main__':
+    debug_mode = False
+    openfile_list = []
+    try:
+        parser = argparse.ArgumentParser(description="")
+        parser.add_argument('--logfile',  type=argparse.FileType('r'), nargs='+', required=True, help='List of one or more input log files')
+        parser.add_argument('--debug',  action='store_true', required=False, help='When specified, it walks through each log processing and print out messages.')
+        parser.add_argument('--linear',  action='store_true', required=False, help='Whether to follow linear execution path along the tree or not.')
+        # Now, we don't need clean mode
+        parser.add_argument('--clean',  action='store_true', required=False, help='When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.')
+
+        args = parser.parse_args()
+        args.clean = True
+        openfile_list = args.logfile
+        if len(openfile_list)>1:
+            print("Specify only one log file. Currently",len(openfile_list),"are given.")
+            sys.exit(0)
+
+        if args.debug==False:
+            debug_mode = False
+        else:
+            debug_mode = bool(args.debug)
+
+        if args.linear==False:
+            linear_mode = False
+        else:
+            linear_mode = bool(args.linear)
+
+        if os.path.exists(reuse_logfilename):
+            prev_reuse_logfilename = pickle.load(open(reuse_logfilename,"r"))
+        else:
+            prev_reuse_logfilename = "-"
+
+        print("** Previous log file:",prev_reuse_logfilename)
+        print("**    Input log file:",openfile_list[0].name)
+
+        clean_mode = False
+        if args.clean==False:
+            if prev_reuse_logfilename==openfile_list[0].name:
+               clean_mode = False
+               print("\033[2;102mNon-Clean (cache reuse, fast) mode\033[0m")
+            else:
+                print("\033[31;91mAlthough you wanted FAST REUSE mode, the input log file is different from the previous run. Forcing clean mode ... \033[0m")
+                print("\033[37;101mClean (slow) mode\033[0m")
+                clean_mode = True
+                os.remove(reuse_logfilename)
+                pickle.dump(openfile_list[0].name, open(reuse_logfilename,"w"))
+        else:
+            print("\033[37;101mClean (slow) mode\033[0m")
+            clean_mode = bool(args.clean)
+
+    except Exception as e:
+        print(('Error: %s' % str(e)))
+
+    print("Loading all logs into memory.")
+    raw_logs = read_log_files( openfile_list, None )
+
+    old_log_count = len(raw_logs)
+    rep_logs = remove_log_template_matches(raw_logs, prepopulated_log_templates)
+    print("==================================================================================================================================")
+    print("Old Log count:",old_log_count)
+    print("New Log count:",len(raw_logs))
+    print("Prepopulated log template count:", len(prepopulated_log_templates))
+    print("Representative logs count:", len(rep_logs))
+    log_templates = copy.deepcopy(prepopulated_log_templates)
+
+    print("Preprocessing logs...")
+    all_logs = preprocess_known_patterns(raw_logs)
+
+    if clean_mode:
+        if os.path.exists(reuse_filename):
+            os.remove(reuse_filename)
+
+    if os.path.exists(reuse_filename):
+        print("Reusing reuse file ...")
+        all_tlogs = pickle.load(open(reuse_filename,"rb"))
+    else:
+        print("Sequence number:", seqnum)
+        print("Tokenizing all logs.")
+        all_tlogs = do_tokenization(all_logs)
+        print("Done tokenizing.", len(all_logs))
+
+        #apply_all_patterns(all_tlogs)
+        print("Rearranging numbers of known patterns to make values unique ...")
+        uniquify_numbers(all_tlogs)
+        print("Done rearranging values.")
+        print("len(all_tlogs):",len(all_tlogs))
+
+        pickle.dump(all_tlogs, open(reuse_filename,"wb"))
+
+    # Maps each log index to its immutable score.
+    # Example: all_log_scores[7] == 3004; mark_matched_logs() decrements score_counts[3004].
+    all_log_scores = build_log_scores(all_logs)
+    # Maps each score to its original log indices.
+    # Example: all_log_score_indices[3004] == [1, 7]; sampling uses it for most_popular.
+    all_log_score_indices = build_log_score_index(all_log_scores)
+
+    tree = Tree()
+    root_node = tree.create_node("TOP", len(raw_logs), "top")
+    root_node.score_counts = dict(Counter(all_log_scores))
+
+    discovery_elapsed = run_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode)
     print("{0:8.3f}".format(tm001), "Apply all patterns")
     print("{0:8.3f}".format(tm002), "Apply new patterns")
     print("{0:8.3f}".format(tm003), "Random sampling logs")
