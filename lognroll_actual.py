@@ -13,7 +13,7 @@ import argparse
 import pickle
 from scipy import stats
 from random import randint
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 
 global debug_mode
@@ -31,9 +31,11 @@ tm009=0.0
 tm010=0.0
 tm011=0.0
 
+# KS-test boundaries from Section 4.2.5.
 UNIFORM_THRESHOLD=0.98
+UNIFORM_EPSILON=0.08
 STAR_THRESHOLD=25
-LOGLEN_THRESHOLD=int(1024*6) 
+MISSING_TOKEN="<MISSING>"
 
 
 
@@ -74,6 +76,7 @@ class Node:
         self.log_templates = []
         self.rep_logs = []
         self.all_vect = [-1]*log_count
+        self.score_counts = None
 
     @property
     def identifier(self):
@@ -260,7 +263,7 @@ def split_by_delimiter(lvl, str_data, delim):
         str_data = s[1:len(s)-1] # remove spaces at the front and back
 
     # split the input string by delimiter
-    tokenized = regex.split("("+delim+")",str_data) # keep the delimiter within the list
+    tokenized = regex.split("("+regex.escape(delim)+")",str_data) # keep the delimiter within the list
 
     # remove empty token
     removed = True
@@ -409,7 +412,7 @@ def are_all_numbers(numlist):
 # included code 2024-03-20
 def is_include_percentage(tok):
 
-    if regex.match(r'[\d\w\W\s]*\d+\.\d+%[\d\w\W\s]*', tok):
+    if regex.match(r'[\d\w\W\s]*\d+(?:\.\d+)?%[\d\w\W\s]*', tok):
         return True
     return False
 
@@ -508,35 +511,30 @@ def follows_format(klist):
     if len(keylist)<2:
         return False
 
-    # check if there is any common characters
+    # Build a regex that preserves the shared character structure.
     seedkey = keylist[0]
     smask = ""
     fixed_count = 0
     for c in range(0,slen):
         pos_fixed = True
+        all_digits = seedkey[c].isdigit()
+        all_alpha = seedkey[c].isalpha()
         for w in keylist[1:]:
             if w[c]!=seedkey[c]:
                 pos_fixed = False
-                break
+            if not w[c].isdigit():
+                all_digits = False
+            if not w[c].isalpha():
+                all_alpha = False
         if pos_fixed:
             fixed_count += 1
-            smask = smask + seedkey[c]
+            smask = smask + regex.escape(seedkey[c])
+        elif all_digits:
+            smask = smask + "\\d"
+        elif all_alpha:
+            smask = smask + "[A-Za-z]"
         else:
-            smask = smask + "."
-
-#    smask = re.sub("[0-9]","dd",smask)
-
-    smask = regex.sub("[0-9]","\d",smask)
-
-# The above code does not work on Python 3, so we modified it to code that does not use re module
-
-    # s = []
-    # for ch in smask:
-    #   if ch in "0123456789":
-    #        s.append('\d')
-    #    else:
-    #        s.append(ch)
-    # smask = "".join(s)
+            return False
 
     if fixed_count==0:
         return False
@@ -589,50 +587,64 @@ def print_correlation(bow,v,w1,w2):
 
 standalone_patterns = [
 #    {   "pattern":"\-?\d+",          # integer
-#        "label": "~100~" },
+#        "label": "~100~",
+#        "matcher": None },
 #    {   "pattern":"\-?\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in integer value
-#        "label": "~101~" },
+#        "label": "~101~",
+#        "matcher": None },
 #    {   "pattern": "\-?\d+\.\d+",     # FP num
-#        "label": "~102~" },
+#        "label": "~102~",
+#        "matcher": None },
 #    {   "pattern":"\-?\d+\.\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in FP value
-#        "label": "~103~" },
+#        "label": "~103~",
+#        "matcher": None },
 #    {   "pattern": "\-?\d+\.\d+%",     # FP percent
-#        "label": "~104~" },
+#        "label": "~104~",
+#        "matcher": None },
 #    {   "pattern":"\d+\^\d+",         # exponent
-#        "label": "~105~" },
+#        "label": "~105~",
+#        "matcher": None },
 #    {   "pattern": "0x[\da-f]+",   # hexa num
-#        "label": "~106~" },
+#        "label": "~106~",
+#        "matcher": None },
 #    {   "pattern": "155\.230\.91\.\\d{3}(:\\d)?",   # IP and port
-#        "label": "~107~" },
+#        "label": "~107~",
+#        "matcher": None },
 
     {   "pattern":"[\da-zA-Z]{8}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{12}", # UUID format
-        "label": "~108~" },
-#    {'pattern': 'container_\\d{13}_\\d{4}_\\d{2}_\\d{6}', 'label': '~109~'},
-#    {'pattern': 'blk_\\d{10}_\\d{4}', 'label': '~110~'},
-#    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~111~'},
-#    {'pattern': 'DFSClient_NONMAPREDUCE_\-?\\d+_\\d', 'label': '~112~'},
-#    {'pattern': 'DFSClient_attempt_\\d+_\\d{4}_._000000_0_\\d+_1', 'label': '~113~'},
-#    {'pattern': 'fsimage.ckpt_\\d{19}', 'label': '~114~'},
-#    {'pattern': 'BP\-\\d{9}\-\\d+.\\d+.\\d+.\\d+\-\\d{13}', 'label': '~115~'},
-#    {'pattern': 'appattempt_\\d{13}_\\d{4}_\\d{6}', 'label': '~116~'},
-#    {'pattern': 'job_\\d{13}_\\d{4}', 'label': '~117~'},
+        "label": "~108~",
+        "matcher": None },
+#    {'pattern': 'container_\\d{13}_\\d{4}_\\d{2}_\\d{6}', 'label': '~109~', 'matcher': None},
+#    {'pattern': 'blk_\\d{10}_\\d{4}', 'label': '~110~', 'matcher': None},
+#    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~111~', 'matcher': None},
+#    {'pattern': 'DFSClient_NONMAPREDUCE_\-?\\d+_\\d', 'label': '~112~', 'matcher': None},
+#    {'pattern': 'DFSClient_attempt_\\d+_\\d{4}_._000000_0_\\d+_1', 'label': '~113~', 'matcher': None},
+#    {'pattern': 'fsimage.ckpt_\\d{19}', 'label': '~114~', 'matcher': None},
+#    {'pattern': 'BP\-\\d{9}\-\\d+.\\d+.\\d+.\\d+\-\\d{13}', 'label': '~115~', 'matcher': None},
+#    {'pattern': 'appattempt_\\d{13}_\\d{4}_\\d{6}', 'label': '~116~', 'matcher': None},
+#    {'pattern': 'job_\\d{13}_\\d{4}', 'label': '~117~', 'matcher': None},
 #
-    {'pattern': 'req\-[a-z0-9]{8}\-[a-z0-9]{4}\-[a-z0-9]{4}\-[a-z0-9]{4}\-[a-z0-9]{12}', 'label': '~115~'},
+    {'pattern': 'req\-[a-z0-9]{8}\-[a-z0-9]{4}\-[a-z0-9]{4}\-[a-z0-9]{4}\-[a-z0-9]{12}', 'label': '~115~', 'matcher': None},
 
-#    {'pattern': 'DFSClient_NONMAPREDUCE_\-\\d{9}_\\d', 'label': '~111~'},
-#    {'pattern': 'DFSClient_attempt_\\d{13}_\\d{4}_r_\\d{6}_\\d_\\d{9}_\\d', 'label': '~112~'},
-#    {'pattern': 'edits_tmp_\\d{19}-\\d{19}_\\d{19}', 'label': '~113~'},
-#    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~114~'},
-#    {'pattern': 'appattempt_\\d\\d\\d\\d\\d........_\\d\\d\\d\\d_\\d\\d\\d\\d\\d\\d', 'label': '~116~'},
-#    {'pattern': 'deimos\\d.', 'label': '~117~'},
-#    {'pattern': 'job_\\d\\d\\d\\d........._\\d\\d\\d\\d', 'label': '~119~'},
-#    {'pattern': '\\d\\d\\d.\\d\\d\\d.\\d\\d.\\d\\d.', 'label': '~121~'},
-#    {'pattern': '#\\d\\d....', 'label': '~122~'},
-#    {'pattern': '\\d.\\d.s', 'label': '~123~'},
-#    {'pattern': 'DS-........-....-\\d...-....-............', 'label': '~124~'},
-#    {'pattern': 'masterappattempt_\\d\\d\\d\\d........._\\d\\d\\d\\d_\\d\\d\\d\\d\\d\\d', 'label': '~125~'},
+#    {'pattern': 'DFSClient_NONMAPREDUCE_\-\\d{9}_\\d', 'label': '~111~', 'matcher': None},
+#    {'pattern': 'DFSClient_attempt_\\d{13}_\\d{4}_r_\\d{6}_\\d_\\d{9}_\\d', 'label': '~112~', 'matcher': None},
+#    {'pattern': 'edits_tmp_\\d{19}-\\d{19}_\\d{19}', 'label': '~113~', 'matcher': None},
+#    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~114~', 'matcher': None},
+#    {'pattern': 'appattempt_\\d\\d\\d\\d\\d........_\\d\\d\\d\\d_\\d\\d\\d\\d\\d\\d', 'label': '~116~', 'matcher': None},
+#    {'pattern': 'deimos\\d.', 'label': '~117~', 'matcher': None},
+#    {'pattern': 'job_\\d\\d\\d\\d........._\\d\\d\\d\\d', 'label': '~119~', 'matcher': None},
+#    {'pattern': '\\d\\d\\d.\\d\\d\\d.\\d\\d.\\d\\d.', 'label': '~121~', 'matcher': None},
+#    {'pattern': '#\\d\\d....', 'label': '~122~', 'matcher': None},
+#    {'pattern': '\\d.\\d.s', 'label': '~123~', 'matcher': None},
+#    {'pattern': 'DS-........-....-\\d...-....-............', 'label': '~124~', 'matcher': None},
+#    {'pattern': 'masterappattempt_\\d\\d\\d\\d........._\\d\\d\\d\\d_\\d\\d\\d\\d\\d\\d', 'label': '~125~', 'matcher': None},
 ]
 
+# These patterns are checked for every token in each sampled log.
+for pattern in standalone_patterns:
+    pattern["matcher"] = regex.compile("^"+pattern["pattern"]+"$")
+
+date_matcher = regex.compile("^(\\d{4})\-(\\d{2})\-(\\d{2})$")
 
 # This list grows as we learn more patterns.
 discovered_patterns = [
@@ -707,11 +719,19 @@ common_patterns = [
         "serial": "1",
         "prefix":"https_url" },
 
+    {   "pattern": "[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+",
+        "serial": "1",
+        "prefix":"email" },
+
     {   "pattern": "http://([a-zA-Z0-9_\-\.]+):([0-9]+)(/[a-zA-Z0-9_\-\.\*\+\-]+)+",
         "serial": "1",
         "prefix":"http_url" },
 
     {   "pattern": "/(var|tmp|home|usr|home|etc|opt|gogo|airwordcount|wikimean|wikimedian|wikistandarddeviation|cluster|jobhistory|node|ws)(/[a-zA-Z0-9_\-\.\*\+\-]+)+",
+        "serial": "1",
+        "prefix":"file_path" },
+
+    {   "pattern": "(?<![a-zA-Z0-9_\-\.\*\+])/(?:[a-zA-Z0-9_\-\.\*\+]+/)*[a-zA-Z0-9_\-\.\*\+]+",
         "serial": "1",
         "prefix":"file_path" },
 
@@ -773,7 +793,7 @@ def replace_known_patterns(tlogs):
                 w = tlogs[i][j]
 
             for pat in standalone_patterns:
-                matched = regex.match("^"+pat["pattern"]+"$",w)
+                matched = pat["matcher"].match(w)
                 if matched!=None:
 
                     #tlogs[i][j] = pat["label"]
@@ -784,7 +804,7 @@ def replace_known_patterns(tlogs):
                     #print "\033[0;35m"+matched.group(0)+"\033[0m -->", tlogs[i][j]
 
             is_date = True
-            matched = regex.match("^(\\d{4})\-(\\d{2})\-(\\d{2})$",w)
+            matched = date_matcher.match(w)
             if matched!=None:
                 year = matched.group(1)
                 month = matched.group(2)
@@ -807,48 +827,62 @@ number_patterns = [
 #    {   "pattern": "\d+\.\d+\.\d+\.\d+(:\d)?", # IP address and port number
 #        "type":"ipaddrport",
 #        "increment":"1",
-#        "serial":"1"},
+#        "serial":"1",
+#        "matcher": None},
 
     {   "pattern":"\-?\d+",          # integer
         "type":"int",
         "increment":"1",
-        "serial": "1" },
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern": "\-?\d+\.\d+",     # FP num
         "type":"float",
-        "increment":"0.1",
-        "serial": "0.1" },
+        "increment":"1",
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern":"\-?\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in integer value
         "type":"int_time",
         "increment":"1",
-        "serial": "1" },
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern":"\-?\d+\.\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", # millisec, seconds, microsec ... in FP value
         "type":"float_time",
-        "increment":"0.1",
-        "serial": "0.1" },
+        "increment":"1",
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern":"\-?\d+\^\d+", # exponent
         "type":"exponent",
         "increment":"1",
-        "serial": "1" },
+        "serial": "1",
+        "matcher": None },
 
     {   "pattern": "0x[\da-fA-F]+", # hexa num
         "type":"hexa1", 
         "increment":"1", # not used
-        "serial": "1" }, # not used
+        "serial": "1", # not used
+        "matcher": None },
 
     {   "pattern": "[\da-fA-F]+",   # hexa num
         "type":"hexa2", 
         "increment":"1", # not used
-        "serial": "1" }, # not used
+        "serial": "1", # not used
+        "matcher": None },
 
 #    {   "pattern": "155\.230\.91\.\\d{3}(:\\d)?",   # IP and port
-#        "label": "~107~" },
+#        "label": "~107~",
+#        "matcher": None },
 #    {   "pattern":"[\da-zA-Z]{8}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{12}", # UUID format
-#        "label": "~108~" },
+#        "label": "~108~",
+#        "matcher": None },
 ]
+
+# Compile once: this matching loop runs for every token in the input corpus.
+for pattern in number_patterns:
+    pattern["matcher"] = regex.compile("^"+pattern["pattern"]+"$")
 
 
 def uniquify_numbers(tlogs):
@@ -863,8 +897,8 @@ def uniquify_numbers(tlogs):
                 w = tlogs[i][j]
 
             found = False
-            for p in number_patterns: 
-                matched = regex.match("^"+p["pattern"]+"$", w)
+            for p in number_patterns:
+                matched = p["matcher"].match(w)
                 if matched!=None:
                     found = True
                     break
@@ -873,14 +907,17 @@ def uniquify_numbers(tlogs):
                     tlogs[i][j] = p["serial"] 
                     p["serial"] = str(int(p["serial"])+int(p["increment"])) #
                 elif p["type"]=="float":
-                    tlogs[i][j] = p["serial"]
-                    p["serial"] = str(float(p["serial"])+float(p["increment"]))
+                    # Keep a decimal representation without binary float drift.
+                    serial = int(p["serial"])
+                    tlogs[i][j] = str(serial//10)+"."+str(serial%10)
+                    p["serial"] = str(serial+int(p["increment"]))
                 elif p["type"]=="int_time": 
                     tlogs[i][j] = p["serial"]+matched.group(1)
                     p["serial"] = str(int(p["serial"])+int(p["increment"]))
                 elif p["type"]=="float_time":
-                    tlogs[i][j] = p["serial"]+matched.group(1)
-                    p["serial"] = str(float(p["serial"])+float(p["increment"]))
+                    serial = int(p["serial"])
+                    tlogs[i][j] = str(serial//10)+"."+str(serial%10)+matched.group(1)
+                    p["serial"] = str(serial+int(p["increment"]))
                 elif p["type"]=="exponent":
                     tlogs[i][j] = p["serial"]
                     p["serial"] = str(int(p["serial"])+int(p["increment"]))
@@ -950,7 +987,7 @@ def apply_all_patterns(tlogs):
                 word = tlogs[i][j]
 
             for p in standalone_patterns:
-                matched = regex.match("^"+p["pattern"]+"$",word)
+                matched = p["matcher"].match(word)
                 if matched!=None:
                     tlogs[i][j] = p["label"]
                     #print "\033[0;35m"+matched.group(0)+"\033[0m -->", tlogs[i][j]
@@ -960,13 +997,15 @@ def apply_all_patterns(tlogs):
     #print "    [apply_all_patterns()] Done converting. It took", elapsed, "seconds"
 
 
-# Just apply newly added pattern to the tokenized logs instead of going through
-# all the patters because regex takes time.
-def apply_new_patterns(tlogs):
+# Apply custom patterns learned since next_pattern_index to the tokenized logs.
+def apply_new_patterns(tlogs, next_pattern_index):
     global tm002
-    # Convert known patterns in the token to a marker
-    #print "    [apply_new_patterns()] Converting tokens of the new known pattern to markers ..."
-    #print "    [apply_new_patterns()] Pattern:", standalone_patterns[-1]
+    global seqnum
+
+    if next_pattern_index >= len(discovered_patterns):
+        return next_pattern_index
+
+    compiled_patterns = [regex.compile("^"+p["pattern"]+"$") for p in discovered_patterns[next_pattern_index:]]
     tm_checkpt = time.time()
     for i in range(0,len(tlogs)):
         tlog = tlogs[i]
@@ -989,14 +1028,17 @@ def apply_new_patterns(tlogs):
 #                tlogs[i][j] = re.sub("\*","~200~",word)
 #                word = tlogs[i][j]
 
-            p = standalone_patterns[-1] # just use the newly added pattern, no need to match all
-            matched = regex.match("^"+p["pattern"]+"$",word)
-            if matched!=None:
-                tlogs[i][j] = p["label"]
-                #print "\033[0;35m"+matched.group(0)+"\033[0m -->", tlogs[i][j]
+            for p in compiled_patterns:
+                matched = p.match(word)
+                if matched!=None:
+                    tlogs[i][j] = "~CP"+format(seqnum,'09d')+"~"
+                    seqnum += 1
+                    seqnum = seqnum % MOD_FACTOR
+                    break
     elapsed = time.time() - tm_checkpt
     tm002 += elapsed
     #print "    [apply_new_patterns()] Done converting. It took", elapsed, "seconds"
+    return len(discovered_patterns)
 
 
 def Determine_runlen_filter_word(token_d, tlogs, ftwords):
@@ -1072,12 +1114,13 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
         #print "\033[43;5m"+"WILDCARD because they are all numbers."+"\033[0m"
         return '*', pv, cr
 
-    if follows_format(list(token_d.keys())):
+    is_custom_pattern_marker = all(token.startswith('~CP') and token.endswith('~') for token in token_d)
+    if not is_custom_pattern_marker and follows_format(list(token_d.keys())):
         if debug_mode:
             print("    \033[43;5m"+"WILDCARD because new pattern is detected."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because new pattern is detected."+"\033[0m"
         return '*', pv, cr
-    if pv>UNIFORM_THRESHOLD:
+    if pv>(1.0 + UNIFORM_THRESHOLD) / 2.0:
         if debug_mode:
             print("    \033[43;5m"+"WILDCARD because it is a uniform distribution."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because it is a uniform distribution."+"\033[0m"
@@ -1094,7 +1137,8 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
         return '*', pv, cr
 
     token =  sorted(token_d, key=lambda k: token_d[k], reverse=True)[0]
-    if '~' in token:
+    # A custom-pattern marker is converted to a wildcard during final template generation.
+    if '~' in token.replace('~200~', '') and not token.startswith('~CP'):
         if debug_mode:
             print("    \033[43;5m"+"WILDCARD because it is a known pattern."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because it is a known pattern."+"\033[0m"
@@ -1165,10 +1209,11 @@ def match_and_remove(tmpl,logs):
 
 
 def exist_match(log_template, logs):
+    template_matcher = regex.compile("^"+log_template+"$")
     for i in range(0,len(logs)):
         if logs[i]==None: 
             continue
-        matched = regex.match("^"+log_template+"$", logs[i])
+        matched = template_matcher.match(logs[i])
         if matched!=None:
             if debug_mode:
                 print("\033[0;32mMatch found at "+str(i)+":", logs[i], "\033[0m ")
@@ -1192,7 +1237,7 @@ def test_multiple_match(rlogs, vect, log_template):
     return cnt, to_delete
 
 
-def mark_matched_logs(logs, vect, rlogs, log_template, i):
+def mark_matched_logs(logs, vect, rlogs, log_template, i, score_counts=None, log_scores=None):
 #    print('Here is mark_matched_logs')
     # very long spark log have trouble at this function, so we must check.
 #    print('logs: ')
@@ -1204,7 +1249,7 @@ def mark_matched_logs(logs, vect, rlogs, log_template, i):
     marked = 0 # how many logs match to the log template?
     replog_selected = False
 
-    log_template = log_template
+    template_matcher = regex.compile("^"+log_template+"$")
 
     for j in range(0,len(logs)):
 
@@ -1213,15 +1258,16 @@ def mark_matched_logs(logs, vect, rlogs, log_template, i):
 
         log = logs[j]
 
-        # TODO if log is too long, it takes too long to match the regular expression even though the number of wildcard is OK.
-        # I am shortening the log
-#        if len(log)>LOGLEN_THRESHOLD:
-#            log = log[:LOGLEN_THRESHOLD]
-
-        matched = regex.match("^"+log_template+"$",log)
+        matched = template_matcher.match(log)
         if matched!=None:
             vect[j] = i
             marked += 1
+
+            if score_counts is not None:
+                score = log_scores[j]
+                score_counts[score] -= 1
+                if score_counts[score] == 0:
+                    del score_counts[score]
 
             if not replog_selected:
                 replog_selected = True
@@ -1311,46 +1357,46 @@ def sample_by_length(logs, vect, ssize):
     sys.exit(0)
 
 
-def sample_by_token_length_and_space_count(logs, tlogs, vect):
+def build_log_scores(logs):
+    scores = []
+    for log in logs:
+        token_count = len(log.split())
+        space_count = log.count(' ') + log.count('\t') + log.count(',') + log.count(':') + log.count(';') + log.count(',')
+        scores.append(token_count*1000 + space_count)
+    return scores
+
+
+def build_log_score_index(log_scores):
+    score_indices = defaultdict(list)
+    for i, score in enumerate(log_scores):
+        score_indices[score].append(i)
+    return score_indices
+
+
+def sample_by_token_length_and_space_count(logs, tlogs, vect, log_scores, score_counts, score_indices):
     global tm006
     tm_checkpt = time.time()
 
-    logscore_d = defaultdict()
-    tlog_d = defaultdict()
-    for i in range(0,len(logs)):
-        if vect[i]>-1: 
-            continue
-        log = logs[i]
-        tlog = tlogs[i]
-
-        toklen = len(log.split())
-        space_cnt = log.count(' ') + log.count('\t') + log.count(',') + log.count(':') + log.count(';') + log.count(',')
-        score = toklen*1000+space_cnt
-
-        if score not in logscore_d:
-            logscore_d[score]= []
-        logscore_d[score].append(log)
-        if score not in tlog_d:
-            tlog_d[score]= []
-        tlog_d[score].append(tlog)
-    most_popular = sorted(logscore_d, key=lambda k: len(logscore_d[k]), reverse=True)[0]
+    most_popular = max(score_counts, key=score_counts.get)
 
     if debug_mode:
         print("** Summary of log groups using characters **")
-        for x in sorted(logscore_d, key=lambda k: len(logscore_d[k]), reverse=True)[:20]:
-            print("  For the key of",format(x,'5d')+",", format(len(logscore_d[x]), '5d'),"logs are grouped.")
+        for score in sorted(score_counts, key=score_counts.get, reverse=True)[:20]:
+            print("  For the key of",format(score,'5d')+",", format(score_counts[score], '5d'),"logs are grouped.")
         print("    ...")
 
     selected = []
-    for log in logscore_d[most_popular]:
-        selected.append(log)
-        if len(selected)>=1000:
-            break
     tselected = []
-    for tlog in tlog_d[most_popular]:
-        tselected.append(tlog)
-        if len(tselected)>=1000:
-            break
+    if score_indices is not None:
+        indices = score_indices[most_popular]
+    else:
+        indices = range(len(log_scores))
+    for i in indices:
+        if vect[i]==-1 and log_scores[i]==most_popular:
+            selected.append(logs[i])
+            tselected.append(tlogs[i])
+            if len(selected)>=1000:
+                break
 
     elapsed = time.time() - tm_checkpt
     #print "{0:.3f}".format(elapsed), "Random log selection"
@@ -1685,6 +1731,14 @@ def do_filtering(tlogs, valid_vect, flt_words, flt_valid_vect):
             if flt_words[j]=='*':
                 continue
 
+            # Match a missing filter word only when this column is absent.
+            if flt_words[j]==MISSING_TOKEN:
+                if j>=len(tlog):
+                    continue
+                else:
+                    add_ok = False
+                    break
+
             if j>len(tlog)-1: 
                 add_ok = False
                 break
@@ -1775,7 +1829,7 @@ def Generate_log_template(fwords):
 def generate_log_template_star(fwords,realcall):
 
     search_patterns = [
-                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+)( |_|:|>|,|\]|\)|/|\"|$)",       "type":"int" },  # int
+                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+)( |_|:|>|,|\]|\)|\(|/|\"|$)",       "type":"int" },  # int
 
 #                        { "pattern":"_\-?\d+",       "type":"int" },  # int
 #                        { "pattern":"\-?\d+_",       "type":"int" },  # int
@@ -1795,7 +1849,7 @@ def generate_log_template_star(fwords,realcall):
 #                        { "pattern":" \-?\d+\.\d+$",  "type":"float" }, # FP
 
                         { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+) ?(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"int_time" }, # millisec, seconds, microsec ... in integer value
-                        #{ "pattern":"\-?\d+\.\d+(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"float_time" }, # millisec, seconds, microsec ... in FP value
+                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+\.\d+) ?(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"float_time" }, # FP value with unit
                         #{ "pattern":"\-?\d+\^\d+", "type":"exponent", "increment":"1" }, # exponent
                         #{ "pattern": "0x[\da-fA-F]+", "type":"hexa1" },
                         #{ "pattern": "[\da-fA-F]+", "type":"hexa2"}
@@ -1837,6 +1891,8 @@ def generate_log_template_star(fwords,realcall):
     log_template = regex.sub("\?","\?",log_template)
     log_template = regex.sub("\+","\+",log_template)
     log_template = regex.sub("\|","\|",log_template)
+    log_template = regex.sub(r"\{", r"\\{", log_template)
+    log_template = regex.sub(r"\}", r"\\}", log_template)
     #log_template = re.sub("\\\\","~201~",log_template)
 
     #log_template = re.sub("\*","\S+",log_template)
@@ -1864,7 +1920,7 @@ def generate_log_template_star(fwords,realcall):
 
     final_template = []
     for t in log_template.split():
-        if ".*" in t and "=.*" not in t and ":.*" not in t: 
+        if ".*" in t and "=.*" not in t and ":.*" not in t and regex.match("^\.+\*(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)$", t)==None:
             final_template.append(".*")
         else:
             final_template.append(t)
@@ -2039,6 +2095,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
         max_runlen = 0
         max_runlen_pct = 0.0
         max_runlen_pos = -1
+        max_runlen_positions = []
 
         all_column_dict = defaultdict() # dict of dict, column_dict per tpos is saved here
         for tpos in range(0,column_cnt):
@@ -2049,11 +2106,14 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 
             column_dict = defaultdict()
             for tlog in filtered_logs: # tlog is the filtered and tokenized log lines
-                if len(tlog) > tpos: 
+                # Missing positions participate in the column frequency.
+                if len(tlog) > tpos:
                     tok = tlog[tpos]
-                    if tok not in column_dict: # if key is not yet created, make one
-                        column_dict[tok] = 0
-                    column_dict[tok] += 1 # increment count
+                else:
+                    tok = MISSING_TOKEN
+                if tok not in column_dict: # if key is not yet created, make one
+                    column_dict[tok] = 0
+                column_dict[tok] += 1 # increment count
             all_column_dict[tpos] = column_dict
 
             if len(column_dict)==0: 
@@ -2064,17 +2124,18 @@ def construct_candidate_log_templates(input_logs, rep_logs):
             runlength = column_dict[runlength_token] 
 
             runlen_percent = float(runlength*100.0)/float(len(filtered_logs))
-            if runlen_percent<100.0 and runlen_percent>max_runlen_pct: 
-                max_runlen = runlength
+            if runlen_percent<100.0 and runlen_percent>max_runlen_pct:
                 max_runlen_pct = runlen_percent
-                max_runlen_pos = tpos
+                max_runlen_positions = [tpos]
+            elif runlen_percent<100.0 and runlen_percent==max_runlen_pct:
+                max_runlen_positions.append(tpos)
             #print tpos, max_runlen_pos, "->"+runlength_token+"<-", runlen_percent
 
             if runlength==len(filtered_logs):
 
                 found = False
                 for p in number_patterns: 
-                    matched = regex.match("^"+p["pattern"]+"$", runlength_token)
+                    matched = p["matcher"].match(runlength_token)
                     if matched!=None:
                         found = True
                 if found:
@@ -2096,6 +2157,11 @@ def construct_candidate_log_templates(input_logs, rep_logs):
                 print("Exiting loop since all filters are determined.", filter_mask)
                 print("->filter_words:", filter_words)
             break
+
+        if len(max_runlen_positions)>1:
+            max_runlen_pos = max_runlen_positions[randint(0,len(max_runlen_positions)-1)]
+        elif len(max_runlen_positions)==1:
+            max_runlen_pos = max_runlen_positions[0]
 
         if max_runlen_pos==-1: 
             print("ERROR: max column not selected!!!")
@@ -2138,29 +2204,33 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 #            print("pv: " + str(pv))
 
             if new_fword=="*":
-                if pv<UNIFORM_THRESHOLD: 
-                    filter_words,filter_mask = finalize_filter_with_star(filter_words,filter_mask)
+                # Handle wildcards not caused by the p-value test.
+                if pv<(1.0 + UNIFORM_THRESHOLD) / 2.0:
+                    filter_mask[max_runlen_pos] = 1
+                    filter_words[max_runlen_pos] = "*"
+                    token_added_order.append("*")
+                    count_added_order.append(len(target_dict))
                 else:
                     tw,tm = finalize_filter_with_star(filter_words,filter_mask)
-                    log_template = generate_log_template_star(tw,False) 
+                    log_template = generate_log_template_star(tw,False)
                     #print "log template:", log_template
                     if exist_match(log_template, rep_logs)>=0:
                         new_fword = sorted(target_dict, key=lambda k: target_dict[k], reverse=True)[0]
                     else:
                         filter_words,filter_mask = finalize_filter_with_star(filter_words,filter_mask)
 
-            else: 
-                if pv>0.9 and pv<UNIFORM_THRESHOLD: 
-                    if add_candidate==False: 
-                        add_candidate = True
-                else: 
-                    pass
+            else:
+                if pv > UNIFORM_THRESHOLD - UNIFORM_EPSILON and pv <= (1.0 + UNIFORM_THRESHOLD) / 2.0:
+                    add_candidate = True
+                else:
+                    add_candidate = False
 
                 if add_candidate:
                     tw,tm = finalize_filter_with_star(filter_words,filter_mask)
                     log_template = generate_log_template_star(tw,False)
                     #print "log template:", log_template
                     #print "\033[1;95mCandidate:", "\033[0m \033[90;102m", "".join(tw), "\033[0m "
+
                     if exist_match(log_template, rep_logs)<0:
                         candidate_set.append(log_template)
                         #print "\033[1;94mCandidate ACCEPTED", "\033[0m ", "\033[1;95mCandidate:", "\033[0m \033[90;102m", "".join(tw), "\033[0m "
@@ -2205,11 +2275,15 @@ def construct_candidate_log_templates(input_logs, rep_logs):
     # All filter_mask is filled now.
     # Generate a log template
     #print "Callling generate_log_template_star() 3"
-    log_template = generate_log_template_star(filter_words,True)
+    template_words = filter_words
+    if MISSING_TOKEN in template_words:
+        template_words = template_words[:template_words.index(MISSING_TOKEN)]
+    log_template = generate_log_template_star(template_words,True)
 
     candidate_set.append(log_template)
 
-    return candidate_set
+    # Identical templates represent the same Tree branch.
+    return list(dict.fromkeys(candidate_set))
 
 
 # Longest common subsequence
@@ -2233,69 +2307,63 @@ def lcs(S,T):
     return lcs_set
 
 
-# thelogs will be reduced by matching log templates
-# logtem is a list of 'count','template' dict
-def compute_slcpl(thelogs, logtem):
+def _pair_lcs_length_sum(template_a, template_b, pair_cache):
+    # TODO: Compare token sequences directly to remove basechar encoding and template truncation.
+    basechar="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()_+[]\{}|;:,./<>?`~=-ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■"
+
+    if len(template_a)>len(basechar):
+        print("\n\n    Number of tokens in the template:",len(template_a))
+        print("    Length of basechar:",len(basechar))
+        print("    "+str(template_a))
+        print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
+        del template_a[len(basechar)-1:]
+
+    if len(template_b)>len(basechar):
+        print("\n\n    Number of tokens in the template:",len(template_b))
+        print("    Length of basechar:",len(basechar))
+        print("    "+str(template_b))
+        print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
+        del template_b[len(basechar)-1:]
+
+    key_a = tuple(template_a)
+    key_b = tuple(template_b)
+    # Use the same cache key regardless of template order.
+    if key_b < key_a:
+        cache_key = (key_b, key_a)
+    else:
+        cache_key = (key_a, key_b)
+
+    if cache_key in pair_cache:
+        return pair_cache[cache_key]
+
+    token_d = {}
+    n = 0
+    for tok in key_a + key_b:
+        if tok in token_d:
+            continue
+        token_d[tok] = basechar[n]
+        n += 1
+
+    str_a = "".join(token_d[tok] for tok in key_a)
+    str_b = "".join(token_d[tok] for tok in key_b)
+    result = sum(len(item) for item in lcs(str_a,str_b))
+
+    pair_cache[cache_key] = result
+    return result
 
 
+# logtem is a list of 'count','template' dict with tokenized static templates
+def compute_slcpl(logtem, pair_cache):
     selected = []
-    for t in sorted(logtem, key=lambda k: k['count'], reverse=True):
-        # first, build a list of index to delete
-        to_delete = []
-        for i in range(0,len(thelogs)):
-            log = thelogs[i]
-            matched = regex.match("^"+t["template"]+"$",log)
-
-            if matched!=None:
-                to_delete.append(i)
-
-        # delete matched logs
-        before_removal = len(thelogs)
-        to_delete = sorted(to_delete)
-        for i in reversed(sorted(to_delete)):
-            del thelogs[i]
-        del_count = before_removal - len(thelogs)
-
-        #print "Removed",del_count,"logs."
-        #if del_count==0:
-        #    print "\033[33;31m",format(del_count,'5d'), format(int(t['count']),'5d'), t['template'], "\033[0m"
-
-        if del_count>0:
-            #t['template'] = t['template'].replace(".*","")
-            t['template'] = do_tokenization([t['template'].replace(".*","")])[0] 
-            selected.append(t)
-            #print t['template']
-
-    #print len(thelogs),"logs remaining."
-    #print "Initial log template count:", len(logtem)
-    #print "Selected log template count:", len(selected)
-
-#    selected =  [
-#        { 
-#            'template': "abcd abcd ",
-#            'count': 10
-#        },
-#        { 
-#            'template': "abcd ccc ",
-#            'count': 10
-#        },
-#        { 
-#            'template': "abcd ddd",
-#            'count': 10
-#        },
-#    ]
+    for t in logtem:
+        selected.append({
+            "count": t["count"],
+            "template": [s for s in t["template"] if s != " "],
+        })
 
     SL_sum = 0
     total_log_count = 0 
     for t in selected:
-
-        u = []
-        for s in t['template']:
-            if s==" ":
-                continue
-            u.append(s)
-        t['template'] = u
-
         static_length = len(t['template'])
         #print "  \033[1;94m", static_length, "\033[0m", "\033[33;36m","".join(t['template']), "\033[0m"
         SL_sum += (static_length * t['count'])
@@ -2314,54 +2382,12 @@ def compute_slcpl(thelogs, logtem):
             if i==j: 
                 continue
 
-            n=0
-            token_d = {}
-            basechar="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()_+[]\{}|;:,./<>?`~=-ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■"
+            set_len_sum += _pair_lcs_length_sum(
+                selected[i]['template'],
+                selected[j]['template'],
+                pair_cache,
+            )
 
-            if len(selected[i]['template'])>len(basechar):
-                print("\n\n    Number of tokens in the template:",len(selected[i]['template']))
-                print("    Length of basechar:",len(basechar))
-                print("    "+str(selected[i]['template']))
-                print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
-                selected[i]['template'] = selected[i]['template'][0:len(basechar)-1]
-                #sys.exit(0)
-
-            if len(selected[j]['template'])>len(basechar):
-                print("\n\n    Number of tokens in the template:",len(selected[j]['template']))
-                print("    Length of basechar:",len(basechar))
-                print("    "+str(selected[j]['template']))
-                print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
-                selected[j]['template'] = selected[j]['template'][0:len(basechar)-1]
-                #sys.exit(0)
-
-            for tok in selected[i]['template']:
-                if tok not in token_d:
-                    token_d[tok]=basechar[n]
-                    n+=1
-            for tok in selected[j]['template']:
-                if tok not in token_d:
-                    token_d[tok]=basechar[n]
-                    n+=1
-
-            if n>len(basechar):
-                print("\033[0;32mERROR: Not enough char set!!", n, len(basechar), "\033[0m")
-                sys.exit(0)
-
-            str_i=""
-            for tok in selected[i]['template']:
-                str_i = str_i + token_d[tok]
-            str_j=""
-            for tok in selected[j]['template']:
-                str_j = str_j + token_d[tok]
-
-            lcs_set = lcs(str_i,str_j)  # get common character set
-
-            #total_cpl +=  sum(len(x) for x in lcs_set)/len(lcs_set) # not used
-            # sum length of all the set elements
-            # multiply by the 'count'
-            # after the loop, divide by the total log count
-            for k in lcs_set:
-                set_len_sum += len(k)
         set_len_sum = float(set_len_sum)/float(len(selected))
 
 #        set_len_sum = float(set_len_sum)/float(len(logtem)) # divide by the log template count because template i is compared with all the rest
@@ -2386,64 +2412,116 @@ def compute_slcpl(thelogs, logtem):
 
 
 
-def mark_matched_logs2(logs, mask, template, verbose=False):
-    marked=0
-    for i in range(0, len(logs)):
-        if mask[i]>-1:
+def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
+    # Keep valid templates from this leaf for scoring.
+    selected = []
+    for t in leaf_node.log_templates:
+        if t is None:
+            continue
+        if t["count"]>0:
+            selected.append({
+                "count":int(t["count"]),
+                "template":str(t["template"]),
+            })
+
+    if len(selected)==0:
+        return None
+
+    score_key = tuple(sorted((t["count"],t["template"]) for t in selected))
+    if score_cache is not None and score_key in score_cache:
+        SL,CPL = score_cache[score_key]
+    else:
+        # Tokenize static template parts for SL/CPL scoring.
+        scoring_templates = []
+        for t in selected:
+            template = t['template']
+            if template not in scoring_token_cache:
+                scoring_token_cache[template] = tuple(
+                    do_tokenization([template.replace(".*","")])[0]
+                )
+            scoring_templates.append({
+                "count":t["count"],
+                "template":scoring_token_cache[template],
+            })
+
+        # Compute the SL and CPL scores for this leaf.
+        SL,CPL = compute_slcpl(scoring_templates,pair_cache)
+        if score_cache is not None:
+            score_cache[score_key] = (SL,CPL)
+    return {
+        "node": leaf_node,
+        "selected": selected,
+        "sum_matched": sum(t["count"] for t in selected),
+        "remaining_count": leaf_node.all_vect.count(-1),
+        "SL": SL,
+        "CPL": CPL,
+        "score": SL-CPL,
+    }
+
+
+def _select_best_leaf(tree):
+    leaf_nodes = []
+    for leaf_node in tree.nodes:
+        if not leaf_node.is_leaf_node():
+            continue
+        if -1 in leaf_node.all_vect:
+            print("Skipping unfinished leaf:", leaf_node.name)
+            continue
+        leaf_nodes.append(leaf_node)
+
+    print("Completed leaf count:",len(leaf_nodes))
+
+    best_result = None
+    score_cache = {}
+    pair_cache = {}
+    scoring_token_cache = {}
+    for leaf_index, leaf_node in enumerate(leaf_nodes):
+
+        print(
+            "Evaluating leaf",
+            str(leaf_index+1)+"/"+str(len(leaf_nodes))+":"
+        )
+        leaf_node.print_node()
+        result = _evaluate_leaf(
+            leaf_node,
+            score_cache,
+            pair_cache,
+            scoring_token_cache,
+        )
+        if result is None:
+            print("Skipping leaf with no effective templates:", leaf_node.name)
             continue
 
-        if verbose:
-            if i%(len(logs)/30)==0:
-                sys.stdout.write('\r'+"    \033[1;91m "+"{0:.1f}".format(float(i*100)/float(len(logs)))+"% \033[0m"+template)
-                sys.stdout.flush()
+        print("    Sum of matched logs:", result["sum_matched"])
+        print("   ",result["remaining_count"],"logs remaining.")
+        print("    Initial template count:", len(leaf_node.log_templates))
+        print("    Selected template count:", len(result["selected"]))
+        print("    SL= "+str(result["SL"]))
+        print("    CPL= "+str(result["CPL"]))
+        print("    score= "+str(result["score"]))
 
-        log = logs[i]
-        first_len = len(log)
-        if len(log)>LOGLEN_THRESHOLD: # If log is too long, match time becomes too long. So, let's cut off.
-            log = log[:LOGLEN_THRESHOLD-3072] # seems 3072 is sufficient
-            if verbose:
-                print("\n\033[0;32m"+template+"\033[0m")
-                print("\033[1;91m<"+str(i)+"/"+str(len(logs))+":"+"{0:.1f}".format(float(i*100)/float(len(logs)))+"%>\033[0m",log)
-                print(first_len,"->",len(log))
-        else:
-            if verbose:
-                print(first_len)
+        if best_result is None or result["score"]>best_result["score"]:
+            best_result = result
 
-        #if len(log)==LOGLEN_THRESHOLD:
-        #    new_tem=template.replace(".*","\S*")
-        #    template=new_tem
+    print("Cached leaf score sets:",len(score_cache))
+    print("Cached template-pair scores:",len(pair_cache))
 
-        matched = regex.match('^'+template+'$', log)
-        if matched!=None:
-            mask[i]=99
-            marked+=1
-            #if "Logging to" in log:
-            #    print "==>", template
-    return marked
+    return best_result
 
 
-def tokenize_log_template(s):    
+template_token_cache = {}
 
-    s = regex.sub("\\\\","",s)
-    tok = custom_split(s) 
-    for y in range(0,len(tok)): 
+
+def tokenize_log_template(s):
+    if s in template_token_cache:
+        return list(template_token_cache[s])
+
+    tok = custom_split(regex.sub("\\\\","",s))
+    for y in range(0,len(tok)):
         if '~' in tok[y]:
             tok[y]=".*"
-    return tok
-
-
-def escape_log_template(s):
-    s = regex.sub("\\\\","\\\\\\\\",s )
-    s = regex.sub("\-","\-",s)
-    s = regex.sub("\[","\[",s)
-    s = regex.sub("\]","\]",s)
-    s = regex.sub("\(","\(",s)
-    s = regex.sub("\)","\)",s)
-    s = regex.sub("\$","\$",s)
-    s = regex.sub("\?","\?",s)
-    s = regex.sub("\+","\+",s)
-    s = regex.sub("\|","\|",s)
-    return s
+    template_token_cache[s] = tok
+    return list(template_token_cache[s])
 
 
 
@@ -2606,15 +2684,6 @@ if __name__ == '__main__':
     print("Loading all logs into memory.")
     raw_logs = read_log_files( openfile_list, None ) 
 
-#    cur_node = pickle.load(open("cur_node.bin","rb"))
-#    #for aa in cur_node.log_templates[:50]:
-#    #    print aa
-#    #sys.exit(0)
-#    mylogs = copy.deepcopy(raw_logs)
-#    SL,CPL = compute_slcpl(mylogs, cur_node.log_templates)
-#    sys.exit(0)
-
-
     old_log_count = len(raw_logs)
     rep_logs = remove_log_template_matches(raw_logs, prepopulated_log_templates)
     print("==================================================================================================================================")
@@ -2656,15 +2725,24 @@ if __name__ == '__main__':
     #            print "   \033[1;34m","("+str(cnt)+")", "".join(x), "\033[0m "
     #            cnt += 1
 
+    # Maps each log index to its immutable score.
+    # Example: all_log_scores[7] == 3004; mark_matched_logs() decrements score_counts[3004].
+    all_log_scores = build_log_scores(all_logs)
+    # Maps each score to its original log indices.
+    # Example: all_log_score_indices[3004] == [1, 7]; sampling uses it for most_popular.
+    all_log_score_indices = build_log_score_index(all_log_scores)
+
     tree = Tree()
-    tree.create_node("TOP", len(raw_logs), "top")
+    root_node = tree.create_node("TOP", len(raw_logs), "top")
+    root_node.score_counts = dict(Counter(all_log_scores))
     cur_node = tree.find_inprogress_node()
+    next_pattern_index = len(discovered_patterns)
 
     runtime_checkpt = time.time()
     #while all_vect.count(-1)>0:
     while -1 in cur_node.all_vect:
 
-        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(all_logs, all_tlogs, cur_node.all_vect)
+        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(all_logs, all_tlogs, cur_node.all_vect, all_log_scores, cur_node.score_counts, all_log_score_indices)
         #sampled_logs = random_sample_logs(all_logs, RANDOM_SAMPLE_SIZE)
         #sampled_logs = sample_by_length(all_logs, all_vect, RANDOM_SAMPLE_SIZE)
         #sampled_logs = sample_by_signature(all_logs, RANDOM_SAMPLE_SIZE)
@@ -2692,6 +2770,7 @@ if __name__ == '__main__':
 
     
         candidate_set = construct_candidate_log_templates(tokenized_logs,cur_node.rep_logs) # returns a list of candidate log templates
+        next_pattern_index = apply_new_patterns(all_tlogs, next_pattern_index)
 
 #        log_template = candidate_set[0]
 #        removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates))
@@ -2720,14 +2799,15 @@ if __name__ == '__main__':
     
                 new_node = tree.find_node(new_identifier)
                 # copy internal state
-                new_node.log_templates = copy.deepcopy(cur_node.log_templates)
-                new_node.rep_logs = copy.deepcopy(cur_node.rep_logs)
-                new_node.all_vect = copy.deepcopy(cur_node.all_vect)
+                new_node.log_templates = list(cur_node.log_templates)
+                new_node.rep_logs = list(cur_node.rep_logs)
+                new_node.all_vect = list(cur_node.all_vect)
+                new_node.score_counts = dict(cur_node.score_counts)
 
                 new_node.print_node()
     
                 # Mark matched logs from all_logs using new log template. 
-                removed_count = mark_matched_logs(all_logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates))
+                removed_count = mark_matched_logs(all_logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates), new_node.score_counts, all_log_scores)
                 if removed_count==0:
                     print("\n\033[1;94mWARNING[1]:\033[0m No logs removed from the template!")
                     print("TEMPLATE->",log_template)
@@ -2746,9 +2826,10 @@ if __name__ == '__main__':
             log_template = candidate_set[0]
 
             tok_candi = tokenize_log_template(log_template) # tok_candi: tokenized candidate
+            merged_template_indices = []
             printed = False
             for i in range(0,len(cur_node.log_templates)):
-                if cur_node.log_templates[i]==None: 
+                if cur_node.log_templates[i]==None:
                     continue
                 tok_logtm = tokenize_log_template(cur_node.log_templates[i]["template"]) # tok_lt: tokenized log template
 
@@ -2760,7 +2841,7 @@ if __name__ == '__main__':
                         if tok_candi[j]!=tok_logtm[j]:
                             diff_count+=1
                             diff_loc = j
-                            if diff_count==2: 
+                            if diff_count==2:
                                 break
                     if diff_count==1:
                         if not printed:
@@ -2771,23 +2852,14 @@ if __name__ == '__main__':
                         print("   Token to update:", tok_candi[diff_loc])
                         print("   Token to update:", tok_logtm[diff_loc])
                         tok_logtm[diff_loc]=".*"
-                        log_template = escape_log_template("".join(tok_logtm))
+                        log_template = "".join(".*".join(regex.escape(part) for part in token.split(".*")) for token in tok_logtm)
+                        tok_candi = tokenize_log_template(log_template)
                         print("   New log_template:", log_template)
+                        merged_template_indices.append(i)
                         cur_node.log_templates[i]=None
                         cur_node.rep_logs[i]=None
 
-            #if del_marked:
-            #    for i in reversed(range(0,len(cur_node.log_templates))):
-            #        print "      template len", len(cur_node.log_templates)
-            #        print "      rep_logs len", len(cur_node.rep_logs)
-            #        if cur_node.log_templates[i]["template"]=="To_be_deleted":
-            #            del cur_node.log_templates[i]
-            #            del cur_node.rep_logs[i]
-            #        print "         template len", len(cur_node.log_templates)
-            #        print "         rep_logs len", len(cur_node.rep_logs)
-            #del_marked = False
-
-            removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates))
+            removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates), cur_node.score_counts, all_log_scores)
             if removed_count==0:
                 print("\n\033[1;95mWARNING[2]:\033[0m \033[1;31mNo logs removed from the template!", "\033[0m")
                 print("   *TEMPLATE->",log_template)
@@ -2808,6 +2880,14 @@ if __name__ == '__main__':
             #    print "["+format(len(cur_node.log_templates),'3d')+"]", format(cur_node.all_vect.count(-1),'5d'), format(removed_count,'4d'), log_template
             #print "["+format(len(cur_node.log_templates),'3d')+"]", format(cur_node.all_vect.count(-1),'5d'), format(removed_count,'4d'), log_template
             #print "\""+re.sub("\"","\\\"",log_template)+"\","
+            # Transfer logs from merged templates to the new template index.
+            previously_matched_count = 0
+            for j in range(0,len(cur_node.all_vect)):
+                if cur_node.all_vect[j] in merged_template_indices:
+                    cur_node.all_vect[j] = len(cur_node.log_templates)
+                    previously_matched_count += 1
+
+            removed_count += previously_matched_count
             print(len(cur_node.log_templates), removed_count, "\033[0;34m"+log_template+"\033[0m")
 
             #sys.exit(0)
@@ -2831,7 +2911,7 @@ if __name__ == '__main__':
         #raw_input("\033[1;94m->Press ENTER to continue ...\033[0m")
 
     # END of outer while loop - done removing all the logs
-    runtime_elapsed = time.time() - runtime_checkpt
+    discovery_elapsed = time.time() - runtime_checkpt
 
     print("{0:8.3f}".format(tm001), "Apply all patterns")
     print("{0:8.3f}".format(tm002), "Apply new patterns")
@@ -2844,117 +2924,27 @@ if __name__ == '__main__':
     print("{0:8.3f}".format(tm004), "Tokenizing logs")
     print("{0:8.3f}".format(tm005), "Filtering all columns")
     print("{0:8.3f}".format(tm011), "Match and remove logs")
-    print("{0:8.3f}".format(runtime_elapsed-tm001-tm002-tm003-tm004-tm005-tm006-tm007-tm008-tm009-tm010-tm011), "Unaccounted")
-    print("{0:8.3f}".format(runtime_elapsed), "\033[0;103mEnd-to-end runtime\033[0m")
+    print("{0:8.3f}".format(discovery_elapsed-tm001-tm002-tm003-tm004-tm005-tm006-tm007-tm008-tm009-tm010-tm011), "Unaccounted")
+    print("{0:8.3f}".format(discovery_elapsed), "\033[0;103mTemplate discovery runtime\033[0m")
 
     print("\033[1;34m",tree.show("top"),"...\033[0m")
     print(" ")
 
-    temp_list=[]
-    for cur_node in tree.nodes:
-        if cur_node.is_leaf_node():
-            #for t in sorted(cur_node.log_templates, reverse=False):
-            #    print "\033[1;103m["+format(t["count"],'4d')+"]\033[0m\n","\""+t["template"]+"\","
-            for t in cur_node.log_templates:
-                if t != None:
-                    temp_list.append(t)
+    scoring_checkpt = time.time()
+    best_result = _select_best_leaf(tree)
+    scoring_elapsed = time.time() - scoring_checkpt
+    if best_result is None:
+        print("ERROR: No completed leaf has an effective template set.", file=sys.stderr)
+        sys.exit(1)
 
-    mycount=0
-    for t in sorted(temp_list, key=lambda k: k['count'], reverse=True):
-        #print mycount,"\033[1;103m["+format(t["count"],'4d')+"]\033[0m\n","\""+t["template"]+"\","
+    print("{0:8.3f}".format(scoring_elapsed), "\033[0;103mLeaf scoring runtime\033[0m")
+    print("{0:8.3f}".format(discovery_elapsed+scoring_elapsed), "\033[0;103mDiscovery plus scoring runtime\033[0m")
+
+    best_node = best_result["node"]
+    print("Best leaf:", best_node.name, "["+best_node.identifier+"]")
+    print("Best leaf SL:", best_result["SL"])
+    print("Best leaf CPL:", best_result["CPL"])
+    print("Best leaf score:", best_result["score"])
+    print("Final template count:", len(best_result["selected"]))
+    for t in sorted(best_result["selected"], key=lambda k: k["count"], reverse=True):
         print(t["count"],t["template"])
-        mycount+=1
-
-    sys.exit(0)
-
-#    for cur_node in tree.nodes:
-#        if cur_node.is_leaf_node():
-#            for t in sorted(cur_node.log_templates, key=lambda k: k['count'], reverse=False):
-#                print "\033[1;103m["+format(t["count"],'4d')+"]\033[0m\n","\""+t["template"]+"\","
-#
-#    for cur_node in tree.nodes:
-#        if cur_node.is_leaf_node():
-#            cur_node.print_node()
-#            for i in range(0,len(cur_node.log_templates)):
-#                t = cur_node.log_templates[i]
-#                print "00000,\""+t['template']+"\",0"
-
-    for cur_node in tree.nodes:
-        if cur_node.is_leaf_node():
-            cur_node.print_node()
-
-            selected=[]
-            mylogs = copy.deepcopy(raw_logs)
-            xlog_templates=[] 
-            log_mask=[-1 for _ in range(len(mylogs))] 
-            for i in range(0,len(cur_node.log_templates)):
-                t = cur_node.log_templates[i]
-                if t==None: 
-                    continue
-
-                #print "\n\033[0;32m"+t['template']+"\033[0m"
-                marked = mark_matched_logs2(mylogs, log_mask, t['template'], False)
-                #print "["+str(i)+"]",marked,t['template']
-
-                xlog_templates.append((marked, t['template'])) 
-                log_mask=[-1 for _ in range(len(mylogs))] 
-    
-                progress_mod=max(5,len(cur_node.log_templates)/40)
-                if i%progress_mod==0:
-                    sys.stdout.write('\r'+"\033[0;103mMatch counting processed "+"{0:.1f}".format(float(i*100)/float(len(cur_node.log_templates)))+"% \033[0m")
-                    sys.stdout.flush()
-
-            #pickle.dump(xlog_templates,open(reuse_filename,"wb"))
-
-            sum_matched=0
-            for t in sorted(xlog_templates,reverse=True):
-                sum_matched += int(t[0])
-            print("    Sum of matched logs:",sum_matched)
-
-            for t in sorted(xlog_templates, reverse=True):
-                # first, build a list of index to delete
-                to_delete = []
-                for i in range(0,len(mylogs)):
-                    log = mylogs[i]
-                    matched = re.match("^"+t[1]+"$",log)
-    
-                    if matched!=None:
-                        to_delete.append(i)
-    
-                # delete matched logs
-                before_removal = len(mylogs)
-                to_delete = sorted(to_delete)
-                for i in reversed(sorted(to_delete)):
-                    del mylogs[i]
-                del_count = before_removal - len(mylogs)
-                #print "Removed",del_count,"logs.",t[1]
-                #if del_count>0:
-                #    print "\033[33;31m",format(del_count,'5d'), format(int(t[0]),'5d'), t[1], "\033[0m"
-
-                #if "Memory usage of ProcessTree" in t[1]:
-                #if "addStoredBlock: blockMap updated:" in t[1]:
-                #if "INFO org.martbay.log:" in t[1]:
-                #    print "\033[33;31m",format(del_count,'5d'), format(int(t[0]),'5d'), t[1], "\033[0m"
-
-                if del_count>0:
-                    #selected.append(t[1])
-                    selected.append({"count":del_count,"template":str(t[1])})
-                    print("\033[33;31m",format(del_count,'5d'), format(int(t[0]),'5d'), t[1], "\033[0m")
-                else:
-                    print("\033[33;32m",format(del_count,'5d'), format(int(t[0]),'5d'), t[1], "\033[0m")
-    
-            print("   ",len(mylogs),"logs remaining.")
-            print("    Initial template count:", len(xlog_templates))
-            print("    Selected template count:", len(selected))
-
-
-
-            mylogs = copy.deepcopy(raw_logs)
-            #SL,CPL = compute_slcpl(mylogs, cur_node.log_templates)
-            SL,CPL = compute_slcpl(mylogs, selected)
-
-            print("SL= "+str(SL))
-            print("CPL= "+str(CPL))
-            #print "\033[1;94mscore= "+str(SL*1.0/(1.0+CPL)), "\033[0m"
-            print("\033[1;94mscore= "+str(SL-CPL), "\033[0m")
-            print(sum_matched, len(mylogs), "0.0", len(cur_node.log_templates), len(selected), "0.0", SL, CPL)
