@@ -63,6 +63,18 @@ def sanitize_id(id):
 (_ADD, _DELETE, _INSERT) = list(range(3))
 (_ROOT, _DEPTH, _WIDTH) = list(range(3))
 
+class LogDataset:
+    """Read-only logs and sampling indexes shared by discovery branches.
+
+    logs[i] is one preprocessed log, log_scores[i] is its score, and log_score_indices[score] lists every matching log index i.
+    """
+
+    def __init__(self, log_count, logs, log_scores, log_score_indices):
+        self.log_count = log_count
+        self.logs = logs
+        self.log_scores = log_scores
+        self.log_score_indices = log_score_indices
+
 class Node:
 
     def __init__(self, name, log_count, identifier=None, expanded=True):
@@ -2623,16 +2635,16 @@ reuse_logfilename="CODE50_REUSE_LOG.p"
 # Discovery execution backend.  Keep multiprocessing coordination in this
 # section so the CLI, candidate construction, matching, and leaf scoring stay
 # independent of the execution strategy.
-def run_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode):
+def run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
     """Run template discovery with the selected execution strategy.
 
     The current backend is sequential.  The parallel branch scheduler will be
     added beside this function and selected here without changing main().
     """
-    return _run_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode)
+    return _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode)
 
 
-def _run_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode):
+def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
     """Run the existing Tree-based Sequential Covering search to completion."""
     cur_node = tree.find_inprogress_node()
     next_pattern_index = len(discovered_patterns)
@@ -2640,7 +2652,7 @@ def _run_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_
 
     while -1 in cur_node.all_vect:
 
-        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(all_logs, all_tlogs, cur_node.all_vect, all_log_scores, cur_node.score_counts, all_log_score_indices)
+        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(log_dataset.logs, all_tlogs, cur_node.all_vect, log_dataset.log_scores, cur_node.score_counts, log_dataset.log_score_indices)
         #sampled_logs = random_sample_logs(all_logs, RANDOM_SAMPLE_SIZE)
         #sampled_logs = sample_by_length(all_logs, all_vect, RANDOM_SAMPLE_SIZE)
         #sampled_logs = sample_by_signature(all_logs, RANDOM_SAMPLE_SIZE)
@@ -2692,7 +2704,7 @@ def _run_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_
 
                 new_name = 'n'+str(tree.serial)
                 new_identifier  = 'i'+str(tree.serial)
-                tree.create_node( new_name, len(raw_logs), new_identifier, parent=cur_node.identifier)
+                tree.create_node( new_name, log_dataset.log_count, new_identifier, parent=cur_node.identifier)
                 tree.serial += 1
     
                 new_node = tree.find_node(new_identifier)
@@ -2705,11 +2717,11 @@ def _run_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_
                 new_node.print_node()
     
                 # Mark matched logs from all_logs using new log template. 
-                removed_count = mark_matched_logs(all_logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates), new_node.score_counts, all_log_scores)
+                removed_count = mark_matched_logs(log_dataset.logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates), new_node.score_counts, log_dataset.log_scores)
                 if removed_count==0:
                     print("\n\033[1;94mWARNING[1]:\033[0m No logs removed from the template!")
                     print("TEMPLATE->",log_template)
-                    print("Remaining logs:", len(all_logs)-sum(1 for x in cur_node.all_vect if x>0))
+                    print("Remaining logs:", log_dataset.log_count-sum(1 for x in cur_node.all_vect if x>0))
                     print("Log template count:", len(cur_node.log_templates))
                     for p in standalone_patterns:
                         print(p['label'],p['pattern'])
@@ -2757,11 +2769,11 @@ def _run_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_
                         cur_node.log_templates[i]=None
                         cur_node.rep_logs[i]=None
 
-            removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates), cur_node.score_counts, all_log_scores)
+            removed_count = mark_matched_logs(log_dataset.logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates), cur_node.score_counts, log_dataset.log_scores)
             if removed_count==0:
                 print("\n\033[1;95mWARNING[2]:\033[0m \033[1;31mNo logs removed from the template!", "\033[0m")
                 print("   *TEMPLATE->",log_template)
-                print("   *Remaining logs:", len(all_logs)-sum(1 for x in cur_node.all_vect if x>0))
+                print("   *Remaining logs:", log_dataset.log_count-sum(1 for x in cur_node.all_vect if x>0))
                 print("   *Log template count:", len(cur_node.log_templates))
                 for p in standalone_patterns:
                     print("   ",p['label'],p['pattern'])
@@ -2870,6 +2882,7 @@ if __name__ == '__main__':
 
     old_log_count = len(raw_logs)
     rep_logs = remove_log_template_matches(raw_logs, prepopulated_log_templates)
+    raw_log_count = len(raw_logs)
     print("==================================================================================================================================")
     print("Old Log count:",old_log_count)
     print("New Log count:",len(raw_logs))
@@ -2879,6 +2892,7 @@ if __name__ == '__main__':
 
     print("Preprocessing logs...")
     all_logs = preprocess_known_patterns(raw_logs)
+    raw_logs = None
 
     if clean_mode:
         if os.path.exists(reuse_filename):
@@ -2907,12 +2921,13 @@ if __name__ == '__main__':
     # Maps each score to its original log indices.
     # Example: all_log_score_indices[3004] == [1, 7]; sampling uses it for most_popular.
     all_log_score_indices = build_log_score_index(all_log_scores)
+    log_dataset = LogDataset(raw_log_count, all_logs, all_log_scores, all_log_score_indices)
 
     tree = Tree()
-    root_node = tree.create_node("TOP", len(raw_logs), "top")
+    root_node = tree.create_node("TOP", log_dataset.log_count, "top")
     root_node.score_counts = dict(Counter(all_log_scores))
 
-    discovery_elapsed = run_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode)
+    discovery_elapsed = run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode)
     print("{0:8.3f}".format(tm001), "Apply all patterns")
     print("{0:8.3f}".format(tm002), "Apply new patterns")
     print("{0:8.3f}".format(tm003), "Random sampling logs")
