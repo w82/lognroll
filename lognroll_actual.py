@@ -2826,7 +2826,7 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
                         print("   Token to update:", tok_candi[diff_loc])
                         print("   Token to update:", tok_logtm[diff_loc])
                         tok_logtm[diff_loc]=".*"
-                        log_template = "".join(".*".join(regex.escape(part) for part in token.split(".*")) for token in tok_logtm)
+                        log_template = generate_log_template_star(tok_logtm,True)
                         tok_candi = tokenize_log_template(log_template)
                         print("   New log_template:", log_template)
                         merged_template_indices.append(i)
@@ -2999,7 +2999,7 @@ def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
         if len(diff_locations) != 1:
             continue
         tok_logtm[diff_locations[0]] = ".*"
-        log_template = "".join(".*".join(regex.escape(part) for part in token.split(".*")) for token in tok_logtm)
+        log_template = generate_log_template_star(tok_logtm,True)
         tok_candi = tokenize_log_template(log_template)
         merged_template_indices.append(index)
         node.log_templates[index] = None
