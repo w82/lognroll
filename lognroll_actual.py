@@ -3,7 +3,6 @@
 
 import os
 import regex
-import ast
 import sys
 import copy
 import time
@@ -2691,7 +2690,6 @@ prepopulated_log_templates = [
 prepopulated_log_templates = []
 #rep_logs = [] 
 
-processed_count=0
 reuse_filename="CODE50_REUSE.p"
 reuse_logfilename="CODE50_REUSE_LOG.p"
 
@@ -3071,26 +3069,6 @@ def _rebuild_tree_from_leaves(tree, log_count, leaves):
         node.score_counts = leaf_node.score_counts
 
 
-# Retained only as a reference for the earlier isolated sequential experiment.
-"""
-def _run_sequential_branch(node, branch_state, leaves, log_dataset, linear_mode, timer_totals):
-    _reset_discovery_timers()
-    candidate_set = run_branch_until_split_or_leaf(node, branch_state, log_dataset, linear_mode)
-    _add_discovery_timers(timer_totals, _discovery_timer_snapshot())
-    if candidate_set is None:
-        leaves.append({"branch_path":branch_state.branch_path,"node":node})
-        return
-    for candidate_index, log_template in enumerate(candidate_set):
-        child_branch_state = copy.deepcopy(branch_state)
-        child_node = copy.deepcopy(node)
-        child_branch_state.branch_path = branch_state.branch_path+(candidate_index,)
-        _activate_branch_state(child_branch_state)
-        _apply_candidate_to_branch(child_node, child_branch_state, log_template, log_dataset)
-        _capture_branch_state(child_branch_state)
-        _run_sequential_branch(child_node, child_branch_state, leaves, log_dataset, linear_mode, timer_totals)
-"""
-
-
 # Each Pool worker initializes these once before it starts processing branch tasks.
 pool_log_dataset = None
 pool_tokenized_log_store = None
@@ -3194,31 +3172,6 @@ def _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, work
     tm001, tm002, tm003, tm004, tm005, tm006, tm007, tm008, tm009, tm010, tm011 = timer_totals
     return time.time()-runtime_checkpt
 
-
-# Retained only as a reference for the earlier strict-isolation experiment.
-# The active dispatcher must not use this path because it replaces the original
-# sequential Tree construction.
-"""
-def _run_isolated_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode):
-    root_state = BranchState([], [], [-1]*len(raw_logs), dict(Counter(all_log_scores)), copy.deepcopy(all_tlogs), len(discovered_patterns))
-    root_state.patterns = copy.deepcopy(discovered_patterns)
-    root_state.seqnum = seqnum
-    root_state.random_state = random.getstate()
-    runtime_checkpt = time.time()
-    timer_totals = [0.0]*11
-    leaves = []
-    _run_sequential_branch(root_state, leaves, all_logs, all_log_scores, all_log_score_indices, linear_mode, timer_totals)
-    _rebuild_tree_from_leaves(tree, len(raw_logs), leaves)
-    return time.time()-runtime_checkpt, timer_totals, False
-
-
-def _run_experimental_dispatch(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode, workers):
-    if workers > 1 and not linear_mode:
-        return _run_parallel_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode, workers)
-    if workers > 1:
-        print("--linear has no candidate branches; using the sequential discovery backend.")
-    return _run_isolated_sequential_tree_discovery(tree, raw_logs, all_logs, all_tlogs, all_log_scores, all_log_score_indices, linear_mode)
-"""
 if __name__ == '__main__':
     debug_mode = False
     openfile_list = []
