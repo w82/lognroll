@@ -15,9 +15,11 @@ import random
 import multiprocessing
 import traceback
 import queue
+import gc
+import tempfile
 from scipy import stats
 from random import randint
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime
 
 global debug_mode
@@ -78,6 +80,42 @@ class LogDataset:
         self.logs = logs
         self.log_scores = log_scores
         self.log_score_indices = log_score_indices
+
+
+class TokenizedLogFileStore:
+    """Store all tokenized logs in a temporary file and load requested logs by index."""
+
+    def __init__(self, filename, offsets):
+        self.filename = filename
+        self.offsets = offsets
+        self.file_handle = None
+
+    @classmethod
+    def write(cls, all_tlogs, directory):
+        filename = os.path.join(directory, "tokenized-logs.pickle")
+        offsets = []
+        with open(filename, "wb") as file_handle:
+            for tlog in all_tlogs:
+                offsets.append(file_handle.tell())
+                pickle.dump(tlog, file_handle, pickle.HIGHEST_PROTOCOL)
+        return cls(filename, offsets)
+
+    def open(self):
+        if self.file_handle is None:
+            self.file_handle = open(self.filename, "rb")
+
+    def read(self, log_index):
+        self.open()
+        self.file_handle.seek(self.offsets[log_index])
+        return pickle.load(self.file_handle)
+
+    def close(self):
+        if self.file_handle is not None:
+            self.file_handle.close()
+            self.file_handle = None
+
+    def __getstate__(self):
+        return {"filename":self.filename, "offsets":self.offsets, "file_handle":None}
 
 class Node:
 
@@ -1054,6 +1092,28 @@ def apply_new_patterns(tlogs, next_pattern_index):
     tm002 += elapsed
     #print "    [apply_new_patterns()] Done converting. It took", elapsed, "seconds"
     return len(discovered_patterns)
+
+
+# TODO: Combine this with apply_new_patterns() when both discovery paths use the same token-log storage.
+def apply_new_patterns_multiprocessing(tlogs):
+    global tm002
+    global seqnum
+
+    compiled_patterns = [regex.compile("^"+p["pattern"]+"$") for p in discovered_patterns]
+    tm_checkpt = time.time()
+    for i in range(0,len(tlogs)):
+        tlog = tlogs[i]
+        for j in range(0,len(tlog)):
+            word = tlog[j]
+            if word in [' ',':',',','=','<','>']:
+                continue
+            for pattern in compiled_patterns:
+                if pattern.match(word) is not None:
+                    tlogs[i][j] = "~CP"+format(seqnum,'09d')+"~"
+                    seqnum += 1
+                    seqnum = seqnum % MOD_FACTOR
+                    break
+    tm002 += time.time()-tm_checkpt
 
 
 def Determine_runlen_filter_word(token_d, tlogs, ftwords):
@@ -2826,6 +2886,7 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
         #print "============================================================================================================="
         #raw_input("\033[1;94m->Press ENTER to continue ...\033[0m")
 
+    print("Final custom pattern count:", len(discovered_patterns))
     return time.time() - runtime_checkpt
 
 
@@ -2833,9 +2894,7 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
 # above; the original sequential Tree backend remains untouched.
 class BranchState:
 
-    def __init__(self, all_tlogs, next_pattern_index, branch_path=()):
-        self.all_tlogs = all_tlogs
-        self.next_pattern_index = next_pattern_index
+    def __init__(self, branch_path=()):
         self.branch_path = branch_path
         self.discovered_patterns = []
         self.seqnum = 1
@@ -2843,11 +2902,10 @@ class BranchState:
 
 
 class BranchResult:
-    """Result returned by one Pool branch task."""
+    """Outcome returned by one branch task run in a multiprocessing Pool worker."""
 
-    def __init__(self, branch_status, branch_path=(), node=None, branch_state=None, candidate_set=None, failure_traceback=None, timers=None):
+    def __init__(self, branch_status, node=None, branch_state=None, candidate_set=None, failure_traceback=None, timers=None):
         self.branch_status = branch_status
-        self.branch_path = branch_path
         self.node = node
         self.branch_state = branch_state
         self.candidate_set = candidate_set
@@ -2882,6 +2940,42 @@ def _capture_branch_state(branch_state):
     branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
     branch_state.seqnum = seqnum
     branch_state.random_state = random.getstate()
+
+
+def _read_tokenized_log_sample_from_store(tokenized_log_store, sample_indices):
+    """Load only the selected tokenized logs from the temporary file by original log index."""
+    global tm006
+    tm_checkpt = time.time()
+    tokenized_logs = []
+    for log_index in sample_indices:
+        tokenized_logs.append(tokenized_log_store.read(log_index))
+    elapsed = time.time() - tm_checkpt
+    tm006 += elapsed
+    return tokenized_logs
+
+
+# TODO: Combine this with sample_by_token_length_and_space_count() when both paths use the same token-log storage.
+def sample_by_token_length_and_space_count_multiprocessing(log_dataset, branch_state, node, tokenized_log_store):
+    most_popular = max(node.score_counts, key=node.score_counts.get)
+    sample_indices = []
+    for log_index in log_dataset.log_score_indices[most_popular]:
+        if node.all_vect[log_index] == -1 and log_dataset.log_scores[log_index] == most_popular:
+            sample_indices.append(log_index)
+            if len(sample_indices) >= 1000:
+                break
+    sampled_logs = [log_dataset.logs[log_index] for log_index in sample_indices]
+    tokenized_logs = _read_tokenized_log_sample_from_store(tokenized_log_store, sample_indices)
+    return sampled_logs, tokenized_logs
+
+
+# Merge patterns discovered by one branch into the shared global list, deduplicated by regex.
+def _merge_branch_patterns(global_patterns, branch_patterns):
+    known_patterns = {pattern["pattern"] for pattern in global_patterns}
+    for pattern in branch_patterns:
+        if pattern["pattern"] not in known_patterns:
+            global_patterns.append(copy.deepcopy(pattern))
+            known_patterns.add(pattern["pattern"])
+    global_patterns.sort(key=lambda pattern:pattern["pattern"])
 
 
 def _apply_candidate_to_branch(node, branch_state, log_template, log_dataset):
@@ -2923,10 +3017,10 @@ def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
     print(len(node.log_templates)-1, removed_count, "\033[0;34m"+log_template+"\033[0m")
 
 
-def run_branch_until_split_or_leaf(node, branch_state, log_dataset):
+def _run_branch_until_split_or_leaf(node, branch_state, log_dataset, tokenized_log_store):
     _activate_branch_state(branch_state)
     while -1 in node.all_vect:
-        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(log_dataset.logs, branch_state.all_tlogs, node.all_vect, log_dataset.log_scores, node.score_counts, log_dataset.log_score_indices)
+        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count_multiprocessing(log_dataset, branch_state, node, tokenized_log_store)
         if len(sampled_logs) == 0:
             break
         if debug_mode:
@@ -2937,8 +3031,8 @@ def run_branch_until_split_or_leaf(node, branch_state, log_dataset):
             print("Number of logs:",len(sampled_logs))
             print("Number of tokenized logs:",len(tokenized_logs))
         replace_known_patterns(tokenized_logs)
+        apply_new_patterns_multiprocessing(tokenized_logs)
         candidate_set = construct_candidate_log_templates(tokenized_logs, node.rep_logs)
-        branch_state.next_pattern_index = apply_new_patterns(branch_state.all_tlogs, branch_state.next_pattern_index)
         if len(candidate_set) == 0:
             raise RuntimeError("No candidate generated for branch "+str(branch_state.branch_path))
         if len(candidate_set) > 1:
@@ -2997,8 +3091,9 @@ def _run_sequential_branch(node, branch_state, leaves, log_dataset, linear_mode,
 """
 
 
-# Initialized once per Pool worker before it runs branch tasks.
+# Each Pool worker initializes these once before it starts processing branch tasks.
 pool_log_dataset = None
+pool_tokenized_log_store = None
 
 
 def _run_parallel_pool_worker_branch(node, branch_state, candidate, candidate_index):
@@ -3008,70 +3103,92 @@ def _run_parallel_pool_worker_branch(node, branch_state, candidate, candidate_in
         _activate_branch_state(branch_state)
         _apply_candidate_to_branch(node, branch_state, candidate, pool_log_dataset)
         _capture_branch_state(branch_state)
-        candidate_set = run_branch_until_split_or_leaf(node, branch_state, pool_log_dataset)
+        candidate_set = _run_branch_until_split_or_leaf(node, branch_state, pool_log_dataset, pool_tokenized_log_store)
         if candidate_set is None:
-            return BranchResult("leaf", branch_path=branch_state.branch_path, node=node, timers=_discovery_timer_snapshot())
+            return BranchResult("leaf", node=node, branch_state=branch_state, timers=_discovery_timer_snapshot())
         return BranchResult("split", node=node, branch_state=branch_state, candidate_set=candidate_set, timers=_discovery_timer_snapshot())
     except BaseException:
-        return BranchResult("failure", branch_path=branch_state.branch_path, failure_traceback=traceback.format_exc(), timers=_discovery_timer_snapshot())
+        return BranchResult("failure", branch_state=branch_state, failure_traceback=traceback.format_exc(), timers=_discovery_timer_snapshot())
 
 
 def _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count):
     context = multiprocessing.get_context("fork")
 
-    def initialize_worker(log_dataset):
-        global pool_log_dataset
+    def initialize_worker(log_dataset, tokenized_log_store):
+        global pool_log_dataset, pool_tokenized_log_store
         pool_log_dataset = log_dataset
+        pool_tokenized_log_store = tokenized_log_store
+        pool_tokenized_log_store.open()
 
-    root_node = tree.find_node("top")
-    root_branch_state = BranchState(all_tlogs, len(discovered_patterns))
-    root_branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
-    root_branch_state.seqnum = seqnum
-    root_branch_state.random_state = random.getstate()
-    _reset_discovery_timers()
-    runtime_checkpt = time.time()
-    candidate_set = run_branch_until_split_or_leaf(root_node, root_branch_state, log_dataset)
-    timer_totals = list(_discovery_timer_snapshot())
-    leaves = []
-    failures = []
-    if candidate_set is None:
-        # No split remains and this node covers every log: completed leaf.
-        leaves.append({"branch_path":root_branch_state.branch_path,"node":root_node})
-    else:
-        event_queue = queue.Queue()
-        pool = context.Pool(worker_count, initialize_worker, (log_dataset,))
-        pending_count = 0
+    with tempfile.TemporaryDirectory(prefix="lognroll-token-store-") as token_directory:
+        tokenized_log_store = TokenizedLogFileStore.write(all_tlogs, token_directory)
+        # Free the parent's full token table after every tokenized log has been written to the temporary file.
+        all_tlogs.clear()
+        gc.collect()
 
-        def submit_branch(node, branch_state, candidate, candidate_index):
-            nonlocal pending_count
-            pool.apply_async(_run_parallel_pool_worker_branch, (node, branch_state, candidate, candidate_index), callback=event_queue.put, error_callback=lambda error:event_queue.put(BranchResult("failure", failure_traceback=repr(error), timers=(0.0,)*11)))
-            pending_count += 1
+        root_node = tree.find_node("top")
+        root_branch_state = BranchState()
+        root_branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
+        root_branch_state.seqnum = seqnum
+        root_branch_state.random_state = random.getstate()
+        _reset_discovery_timers()
+        runtime_checkpt = time.time()
+        candidate_set = _run_branch_until_split_or_leaf(root_node, root_branch_state, log_dataset, tokenized_log_store)
+        timer_totals = list(_discovery_timer_snapshot())
+        leaves = []
+        failures = []
+        global_patterns = copy.deepcopy(root_branch_state.discovered_patterns)
+        if candidate_set is None:
+            leaves.append({"branch_path":root_branch_state.branch_path,"node":root_node})
+        else:
+            # Close the parent's file handle so every worker opens its own handle and keeps its own read position.
+            tokenized_log_store.close()
 
-        try:
-            # Multiple candidates turn this logical node into Pool tasks.
-            for candidate_index, candidate in enumerate(candidate_set):
-                submit_branch(root_node, root_branch_state, candidate, candidate_index)
-            while pending_count > 0:
-                result = event_queue.get()
-                pending_count -= 1
-                _add_discovery_timers(timer_totals, result.timers)
-                if result.branch_status == "leaf":
-                    leaves.append({"branch_path":result.branch_path,"node":result.node})
-                elif result.branch_status == "split":
-                    for candidate_index, candidate in enumerate(result.candidate_set):
-                        submit_branch(result.node, result.branch_state, candidate, candidate_index)
+            event_queue = queue.Queue()
+            # Keep branch tasks in the parent until a Pool worker is available instead of filling Pool's internal queue.
+            pending_branches = deque((root_node, root_branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(candidate_set))
+            pool = context.Pool(worker_count, initialize_worker, (log_dataset, tokenized_log_store))
+            pending_count = 0
+
+            # Submit pending branches until every available worker slot is occupied.
+            def submit_available_branches():
+                nonlocal pending_count
+                while pending_count < worker_count and len(pending_branches) > 0:
+                    node, branch_state, candidate, candidate_index = pending_branches.popleft()
+                    branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                    pool.apply_async(_run_parallel_pool_worker_branch, (node, branch_state, candidate, candidate_index), callback=event_queue.put, error_callback=lambda error:event_queue.put(BranchResult("failure", failure_traceback=repr(error), timers=(0.0,)*11)))
+                    pending_count += 1
+
+            try:
+                submit_available_branches()
+                while pending_count > 0:
+                    result = event_queue.get()
+                    pending_count -= 1
+                    _add_discovery_timers(timer_totals, result.timers)
+                    if result.branch_status == "leaf":
+                        _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                        leaves.append({"branch_path":result.branch_state.branch_path,"node":result.node})
+                    elif result.branch_status == "split":
+                        _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                        result.branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                        pending_branches.extend((result.node, result.branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(result.candidate_set))
+                    else:
+                        failures.append(result)
+                        break
+                    submit_available_branches()
+            finally:
+                if len(failures) > 0:
+                    pool.terminate()
                 else:
-                    failures.append(result)
-                    break
-        finally:
-            if len(failures) > 0:
-                pool.terminate()
-            else:
-                pool.close()
-            pool.join()
+                    pool.close()
+                pool.join()
+        tokenized_log_store.close()
     if len(failures) > 0:
         failure = failures[0]
-        raise RuntimeError("Parallel branch failed at "+str(failure.branch_path)+"\n"+failure.failure_traceback)
+        failure_path = "unknown" if failure.branch_state is None else failure.branch_state.branch_path
+        raise RuntimeError("Parallel branch failed at "+str(failure_path)+"\n"+failure.failure_traceback)
+    discovered_patterns[:] = copy.deepcopy(global_patterns)
+    print("Final custom pattern count:", len(discovered_patterns))
     _rebuild_tree_from_leaves(tree, log_dataset.log_count, leaves)
     global tm001, tm002, tm003, tm004, tm005, tm006, tm007, tm008, tm009, tm010, tm011
     tm001, tm002, tm003, tm004, tm005, tm006, tm007, tm008, tm009, tm010, tm011 = timer_totals
