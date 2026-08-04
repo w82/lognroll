@@ -2486,6 +2486,12 @@ def compute_slcpl(logtem, pair_cache):
 
 
 
+def tokenize_template_for_slcl(template):
+    static_template = template.replace(".*","")
+    unescaped_template = regex.sub("\\\\","",static_template)
+    return unescaped_template.split()
+
+
 def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
     # Keep valid templates from this leaf for scoring.
     selected = []
@@ -2510,9 +2516,7 @@ def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
         for t in selected:
             template = t['template']
             if template not in scoring_token_cache:
-                scoring_token_cache[template] = tuple(
-                    do_tokenization([template.replace(".*","")])[0]
-                )
+                scoring_token_cache[template] = tuple(tokenize_template_for_slcl(template))
             scoring_templates.append({
                 "count":t["count"],
                 "template":scoring_token_cache[template],
