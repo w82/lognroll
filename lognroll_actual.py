@@ -2492,17 +2492,66 @@ def tokenize_template_for_slcl(template):
     return unescaped_template.split()
 
 
-def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
-    # Keep valid templates from this leaf for scoring.
-    selected = []
-    for t in leaf_node.log_templates:
+def _get_template_coverage(template,logs,coverage_cache):
+    # Return this final regex's full-corpus match bitmap and raw match count.
+    if template in coverage_cache:
+        return coverage_cache[template]
+    matcher = regex.compile("^"+template+"$")
+    coverage_bytes = bytearray((len(logs)+7)//8)
+    match_count = 0
+    for log_index,log in enumerate(logs):
+        if matcher.match(log) is None:
+            continue
+        coverage_bytes[log_index//8] |= 1 << (log_index%8)
+        match_count += 1
+    result = (int.from_bytes(coverage_bytes,byteorder="little"),match_count)
+    coverage_cache[template] = result
+    return result
+
+
+def _build_effective_template_set(log_templates,logs,coverage_cache):
+    candidates = []
+    for t in log_templates:
         if t is None:
             continue
-        if t["count"]>0:
-            selected.append({
-                "count":int(t["count"]),
-                "template":str(t["template"]),
-            })
+        template = str(t["template"])
+        coverage,match_count = _get_template_coverage(template,logs,coverage_cache)
+        if match_count>0:
+            candidates.append({"template":template,"coverage":coverage,"match_count":match_count})
+    candidates.sort(key=lambda candidate:(candidate["match_count"],candidate["template"]),reverse=True)
+    selected = []
+    covered = 0
+    matched_count = 0
+    for candidate in candidates:
+        newly_covered = candidate["coverage"] & ~covered
+        newly_matched_count = bin(newly_covered).count("1")
+        if newly_matched_count==0:
+            continue
+        selected.append({"count":newly_matched_count,"template":candidate["template"]})
+        covered |= candidate["coverage"]
+        matched_count += newly_matched_count
+    return selected,matched_count
+
+
+class LeafScore:
+
+    def __init__(self,node,selected,sum_matched,log_count,sl,cpl,score):
+        self.node = node
+        self.selected = selected
+        self.sum_matched = sum_matched
+        self.log_count = log_count
+        self.sl = sl
+        self.cpl = cpl
+        self.score = score
+
+    @property
+    def remaining_count(self):
+        return self.log_count-self.sum_matched
+
+
+def _evaluate_leaf(leaf_node, logs, score_cache, pair_cache, scoring_token_cache, coverage_cache):
+    # Rebuild the effective set from full-corpus regex coverage.
+    selected,sum_matched = _build_effective_template_set(leaf_node.log_templates,logs,coverage_cache)
 
     if len(selected)==0:
         return None
@@ -2526,18 +2575,10 @@ def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
         SL,CPL = compute_slcpl(scoring_templates,pair_cache)
         if score_cache is not None:
             score_cache[score_key] = (SL,CPL)
-    return {
-        "node": leaf_node,
-        "selected": selected,
-        "sum_matched": sum(t["count"] for t in selected),
-        "remaining_count": leaf_node.all_vect.count(-1),
-        "SL": SL,
-        "CPL": CPL,
-        "score": SL-CPL,
-    }
+    return LeafScore(leaf_node,selected,sum_matched,len(logs),SL,CPL,SL-CPL)
 
 
-def _select_best_leaf(tree):
+def _select_best_leaf(tree, logs):
     leaf_nodes = []
     for leaf_node in tree.nodes:
         if not leaf_node.is_leaf_node():
@@ -2553,6 +2594,7 @@ def _select_best_leaf(tree):
     score_cache = {}
     pair_cache = {}
     scoring_token_cache = {}
+    coverage_cache = {}
     for leaf_index, leaf_node in enumerate(leaf_nodes):
 
         print(
@@ -2560,29 +2602,25 @@ def _select_best_leaf(tree):
             str(leaf_index+1)+"/"+str(len(leaf_nodes))+":"
         )
         leaf_node.print_node()
-        result = _evaluate_leaf(
-            leaf_node,
-            score_cache,
-            pair_cache,
-            scoring_token_cache,
-        )
+        result = _evaluate_leaf(leaf_node,logs,score_cache,pair_cache,scoring_token_cache,coverage_cache)
         if result is None:
             print("Skipping leaf with no effective templates:", leaf_node.name)
             continue
 
-        print("    Sum of matched logs:", result["sum_matched"])
-        print("   ",result["remaining_count"],"logs remaining.")
+        print("    Sum of matched logs:", result.sum_matched)
+        print("   ",result.remaining_count,"logs remaining.")
         print("    Initial template count:", len(leaf_node.log_templates))
-        print("    Selected template count:", len(result["selected"]))
-        print("    SL= "+str(result["SL"]))
-        print("    CPL= "+str(result["CPL"]))
-        print("    score= "+str(result["score"]))
+        print("    Selected template count:", len(result.selected))
+        print("    SL= "+str(result.sl))
+        print("    CPL= "+str(result.cpl))
+        print("    score= "+str(result.score))
 
-        if best_result is None or result["score"]>best_result["score"]:
+        if best_result is None or result.score>best_result.score:
             best_result = result
 
     print("Cached leaf score sets:",len(score_cache))
     print("Cached template-pair scores:",len(pair_cache))
+    print("Cached template coverages:",len(coverage_cache))
 
     return best_result
 
@@ -3315,7 +3353,7 @@ if __name__ == '__main__':
     print(" ")
 
     scoring_checkpt = time.time()
-    best_result = _select_best_leaf(tree)
+    best_result = _select_best_leaf(tree,log_dataset.logs)
     scoring_elapsed = time.time() - scoring_checkpt
     if best_result is None:
         print("ERROR: No completed leaf has an effective template set.", file=sys.stderr)
@@ -3324,11 +3362,11 @@ if __name__ == '__main__':
     print("{0:8.3f}".format(scoring_elapsed), "\033[0;103mLeaf scoring runtime\033[0m")
     print("{0:8.3f}".format(discovery_elapsed+scoring_elapsed), "\033[0;103mDiscovery plus scoring runtime\033[0m")
 
-    best_node = best_result["node"]
+    best_node = best_result.node
     print("Best leaf:", best_node.name, "["+best_node.identifier+"]")
-    print("Best leaf SL:", best_result["SL"])
-    print("Best leaf CPL:", best_result["CPL"])
-    print("Best leaf score:", best_result["score"])
-    print("Final template count:", len(best_result["selected"]))
-    for t in sorted(best_result["selected"], key=lambda k: k["count"], reverse=True):
+    print("Best leaf SL:", best_result.sl)
+    print("Best leaf CPL:", best_result.cpl)
+    print("Best leaf score:", best_result.score)
+    print("Final template count:", len(best_result.selected))
+    for t in sorted(best_result.selected, key=lambda k: k["count"], reverse=True):
         print(t["count"],t["template"])
