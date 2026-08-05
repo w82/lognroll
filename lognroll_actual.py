@@ -2382,23 +2382,6 @@ def lcs(S,T):
 
 
 def _pair_lcs_length_sum(template_a, template_b, pair_cache):
-    # TODO: Compare token sequences directly to remove basechar encoding and template truncation.
-    basechar="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()_+[]\{}|;:,./<>?`~=-ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■"
-
-    if len(template_a)>len(basechar):
-        print("\n\n    Number of tokens in the template:",len(template_a))
-        print("    Length of basechar:",len(basechar))
-        print("    "+str(template_a))
-        print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
-        del template_a[len(basechar)-1:]
-
-    if len(template_b)>len(basechar):
-        print("\n\n    Number of tokens in the template:",len(template_b))
-        print("    Length of basechar:",len(basechar))
-        print("    "+str(template_b))
-        print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
-        del template_b[len(basechar)-1:]
-
     key_a = tuple(template_a)
     key_b = tuple(template_b)
     # Use the same cache key regardless of template order.
@@ -2415,7 +2398,7 @@ def _pair_lcs_length_sum(template_a, template_b, pair_cache):
     for tok in key_a + key_b:
         if tok in token_d:
             continue
-        token_d[tok] = basechar[n]
+        token_d[tok] = chr(n)
         n += 1
 
     str_a = "".join(token_d[tok] for tok in key_a)
