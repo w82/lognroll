@@ -2360,28 +2360,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
     return list(dict.fromkeys(candidate_set))
 
 
-# Longest common subsequence
-def lcs(S,T):
-    m = len(S)
-    n = len(T)
-    counter = [[0]*(n+1) for x in range(m+1)]
-    longest = 0
-    lcs_set = set()
-    for i in range(m):
-        for j in range(n):
-            if S[i] == T[j]:
-                c = counter[i][j] + 1
-                counter[i+1][j+1] = c
-                if c > longest:
-                    lcs_set = set()
-                    longest = c
-                    lcs_set.add(S[i-c+1:i+1])
-                elif c == longest:
-                    lcs_set.add(S[i-c+1:i+1])
-    return lcs_set
-
-
-def _pair_lcs_length_sum(template_a, template_b, pair_cache):
+def _pair_common_static_count(template_a, template_b, pair_cache):
     key_a = tuple(template_a)
     key_b = tuple(template_b)
     # Use the same cache key regardless of template order.
@@ -2393,35 +2372,25 @@ def _pair_lcs_length_sum(template_a, template_b, pair_cache):
     if cache_key in pair_cache:
         return pair_cache[cache_key]
 
-    token_d = {}
-    n = 0
-    for tok in key_a + key_b:
-        if tok in token_d:
-            continue
-        token_d[tok] = chr(n)
-        n += 1
-
-    str_a = "".join(token_d[tok] for tok in key_a)
-    str_b = "".join(token_d[tok] for tok in key_b)
-    result = sum(len(item) for item in lcs(str_a,str_b))
+    result = sum(1 for token_a,token_b in zip(key_a,key_b) if token_a==token_b and token_a!=".*")
 
     pair_cache[cache_key] = result
     return result
 
 
-# logtem is a list of 'count','template' dict with tokenized static templates
+# logtem is a list of 'count','template' dict with wildcard position markers
 def compute_slcpl(logtem, pair_cache):
     selected = []
     for t in logtem:
         selected.append({
             "count": t["count"],
-            "template": [s for s in t["template"] if s != " "],
+            "template": list(t["template"]),
         })
 
     SL_sum = 0
     total_log_count = 0 
     for t in selected:
-        static_length = len(t['template'])
+        static_length = sum(1 for token in t['template'] if token!=".*")
         #print "  \033[1;94m", static_length, "\033[0m", "\033[33;36m","".join(t['template']), "\033[0m"
         SL_sum += (static_length * t['count'])
         total_log_count += t['count']
@@ -2439,11 +2408,7 @@ def compute_slcpl(logtem, pair_cache):
             if i==j: 
                 continue
 
-            set_len_sum += _pair_lcs_length_sum(
-                selected[i]['template'],
-                selected[j]['template'],
-                pair_cache,
-            )
+            set_len_sum += _pair_common_static_count(selected[i]['template'],selected[j]['template'],pair_cache)
 
         set_len_sum = float(set_len_sum)/float(len(selected))
 
@@ -2470,8 +2435,8 @@ def compute_slcpl(logtem, pair_cache):
 
 
 def tokenize_template_for_slcl(template):
-    static_template = template.replace(".*","")
-    unescaped_template = regex.sub("\\\\","",static_template)
+    position_template = template.replace(".*"," .* ")
+    unescaped_template = regex.sub("\\\\","",position_template)
     return unescaped_template.split()
 
 
