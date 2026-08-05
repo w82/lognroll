@@ -2410,10 +2410,6 @@ def compute_slcpl(logtem, pair_cache):
 
             set_len_sum += _pair_common_static_count(selected[i]['template'],selected[j]['template'],pair_cache)
 
-        set_len_sum = float(set_len_sum)/float(len(selected))
-
-#        set_len_sum = float(set_len_sum)/float(len(logtem)) # divide by the log template count because template i is compared with all the rest
-
         #print "\n",i,"set_len_sum=",set_len_sum
         #print "    weighted:", float(set_len_sum*selected[i]['count'])/float(total_log_count)
         weighted_cpl_sum += float(set_len_sum*selected[i]['count'])/float(total_log_count) # weighted sum of cpl
@@ -2519,7 +2515,7 @@ class LeafScore:
 
 
 def _evaluate_leaf(leaf_node, logs, score_cache, pair_cache, scoring_token_cache, coverage_cache):
-    # Rebuild the effective set from full-corpus regex coverage.
+    # Rebuild the effective set from full-corpus regex coverage as required by Section 3.1.
     selected,sum_matched = _build_effective_template_set(leaf_node.log_templates,logs,coverage_cache)
 
     if len(selected)==0:
