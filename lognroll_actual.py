@@ -2481,9 +2481,17 @@ def _build_effective_template_set(log_templates,logs,coverage_cache):
     return selected,matched_count
 
 
+def _compute_adjusted_slcl(slcl,matched_count,log_count,used_template_count,output_template_count):
+    completeness_ratio = float(matched_count)/float(log_count)
+    comprehensiveness_ratio = float(used_template_count)/float(output_template_count)
+    adjustment_ratio = completeness_ratio*comprehensiveness_ratio
+    adjusted_slcl = adjustment_ratio*slcl
+    return completeness_ratio,comprehensiveness_ratio,adjusted_slcl
+
+
 class LeafScore:
 
-    def __init__(self,node,selected,sum_matched,log_count,sl,cpl,score):
+    def __init__(self,node,selected,sum_matched,log_count,sl,cpl,score,output_template_count):
         self.node = node
         self.selected = selected
         self.sum_matched = sum_matched
@@ -2491,10 +2499,23 @@ class LeafScore:
         self.sl = sl
         self.cpl = cpl
         self.score = score
+        self.output_template_count = output_template_count
 
     @property
     def remaining_count(self):
         return self.log_count-self.sum_matched
+
+    @property
+    def slcl(self):
+        return self.sl-self.cpl
+
+    @property
+    def completeness_ratio(self):
+        return float(self.sum_matched)/float(self.log_count)
+
+    @property
+    def comprehensiveness_ratio(self):
+        return float(len(self.selected))/float(self.output_template_count)
 
 
 def _evaluate_leaf(leaf_node, logs, score_cache, pair_cache, scoring_token_cache, coverage_cache):
@@ -2503,6 +2524,8 @@ def _evaluate_leaf(leaf_node, logs, score_cache, pair_cache, scoring_token_cache
 
     if len(selected)==0:
         return None
+
+    output_template_count = sum(1 for t in leaf_node.log_templates if t is not None)
 
     score_key = tuple(sorted((t["count"],t["template"]) for t in selected))
     if score_cache is not None and score_key in score_cache:
@@ -2523,7 +2546,8 @@ def _evaluate_leaf(leaf_node, logs, score_cache, pair_cache, scoring_token_cache
         SL,CPL = compute_slcpl(scoring_templates,pair_cache)
         if score_cache is not None:
             score_cache[score_key] = (SL,CPL)
-    return LeafScore(leaf_node,selected,sum_matched,len(logs),SL,CPL,SL-CPL)
+    adjusted_SLCL = _compute_adjusted_slcl(SL-CPL,sum_matched,len(logs),len(selected),output_template_count)[2]
+    return LeafScore(leaf_node,selected,sum_matched,len(logs),SL,CPL,adjusted_SLCL,output_template_count)
 
 
 def _select_best_leaf(tree, logs):
@@ -2557,11 +2581,14 @@ def _select_best_leaf(tree, logs):
 
         print("    Sum of matched logs:", result.sum_matched)
         print("   ",result.remaining_count,"logs remaining.")
-        print("    Initial template count:", len(leaf_node.log_templates))
-        print("    Selected template count:", len(result.selected))
+        print("    Output template count:", result.output_template_count)
+        print("    Used template count:", len(result.selected))
         print("    SL= "+str(result.sl))
         print("    CPL= "+str(result.cpl))
-        print("    score= "+str(result.score))
+        print("    SLCL= "+str(result.slcl))
+        print("    Completeness ratio= "+str(result.completeness_ratio))
+        print("    Comprehensiveness ratio= "+str(result.comprehensiveness_ratio))
+        print("    Adjusted-SLCL= "+str(result.score))
 
         if best_result is None or result.score>best_result.score:
             best_result = result
@@ -3314,7 +3341,10 @@ if __name__ == '__main__':
     print("Best leaf:", best_node.name, "["+best_node.identifier+"]")
     print("Best leaf SL:", best_result.sl)
     print("Best leaf CPL:", best_result.cpl)
-    print("Best leaf score:", best_result.score)
+    print("Best leaf SLCL:", best_result.slcl)
+    print("Best leaf completeness ratio:", best_result.completeness_ratio)
+    print("Best leaf comprehensiveness ratio:", best_result.comprehensiveness_ratio)
+    print("Best leaf Adjusted-SLCL:", best_result.score)
     print("Final template count:", len(best_result.selected))
     for t in sorted(best_result.selected, key=lambda k: k["count"], reverse=True):
         print(t["count"],t["template"])
