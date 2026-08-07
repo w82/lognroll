@@ -30,11 +30,16 @@ INFO org.apache.hadoop.metrics2.impl.MetricsConfig: loaded properties from hadoo
 ### How to run
 $ python ./lognroll_actual.py --linear --logfile logs/hadoop_clean.log
 
+Template discovery can also branch out across multiple processes instead of walking the tree one candidate at a time:
+$ python ./lognroll_actual.py --logfile logs/hadoop_clean.log --workers 20
+
 ### Execution Parameter
 * --linear: Whether to follow linear execution path along the tree or not.
 * --clean: When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.
 * --debug: When specified, it walks through each log processing and print out messages.
 * --logfile: List of one or more input log files
+* --workers: Maximum number of candidate tree branches to explore concurrently, each in its own process (default: 1). Ignored when --linear is set.
+* --seed: Seed for Python's and NumPy's random generators, for reproducible runs.
 
 ### Default log files
 By default, the logs folder has log files extracted from Hadoop and Cassandra, respectively. If you want to input the log files you extracted yourself, you'd better put the timestamp-removed log file.
