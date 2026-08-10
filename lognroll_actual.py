@@ -11,7 +11,9 @@ import numpy
 import argparse
 import pickle
 import random
+import threading
 import multiprocessing
+import concurrent.futures
 import traceback
 import queue
 import gc
@@ -45,6 +47,44 @@ MISSING_TOKEN="<MISSING>"
 
 
 seqnum=1
+
+
+# Thread-pool branch backend (--parallel-backend thread) support. The sequential and
+# process-pool backends keep using the plain module globals above directly (each process
+# has its own memory, so that adapter is safe there); a thread-pool worker instead reads
+# and writes the thread-local copies below so concurrent branch threads cannot stomp on
+# each other's discovered_patterns/seqnum/random state. See _get_seqnum() etc. below.
+_thread_local_discovery = threading.local()
+
+
+def _thread_local_discovery_active():
+    return getattr(_thread_local_discovery, "active", False)
+
+
+def _get_discovered_patterns():
+    if _thread_local_discovery_active():
+        return _thread_local_discovery.discovered_patterns
+    return discovered_patterns
+
+
+def _get_seqnum():
+    if _thread_local_discovery_active():
+        return _thread_local_discovery.seqnum
+    return seqnum
+
+
+def _set_seqnum(value):
+    if _thread_local_discovery_active():
+        _thread_local_discovery.seqnum = value
+    else:
+        global seqnum
+        seqnum = value
+
+
+def _next_randint(a, b):
+    if _thread_local_discovery_active():
+        return _thread_local_discovery.rng.randint(a, b)
+    return randint(a, b)
 
 
 
@@ -528,8 +568,6 @@ def is_all_floatingpoint(numlist):
 
 def follows_format(klist):
 
-    global smask
-
     #if debug_mode:
     #    print "        [follows_format()] Entering. len=",len(klist)
 
@@ -592,16 +630,17 @@ def follows_format(klist):
         return False
 
 
-    pat = { "pattern": smask, "label":"~"+str(400+len(discovered_patterns))+"~"}
+    patterns = _get_discovered_patterns()
+    pat = { "pattern": smask, "label":"~"+str(400+len(patterns))+"~"}
 
     pattern_exists = False
-    for p in discovered_patterns:
+    for p in patterns:
         if p["pattern"]==smask:
             pattern_exists = True
             pat = p
             break
     if not pattern_exists:
-        discovered_patterns.append(pat)
+        patterns.append(pat)
 
     return True
 
@@ -822,8 +861,6 @@ def preprocess_known_patterns(logs):
 
 
 def replace_known_patterns(tlogs):
-    global seqnum
-
     for i in range(0,len(tlogs)):
         tlog = tlogs[i]
 
@@ -849,9 +886,8 @@ def replace_known_patterns(tlogs):
                 if matched!=None:
 
                     #tlogs[i][j] = pat["label"]
-                    tlogs[i][j] = "~AB"+format(seqnum,'09d')+"~"
-                    seqnum += 1
-                    seqnum = seqnum % MOD_FACTOR
+                    tlogs[i][j] = "~AB"+format(_get_seqnum(),'09d')+"~"
+                    _set_seqnum((_get_seqnum()+1) % MOD_FACTOR)
 
                     #print "\033[0;35m"+matched.group(0)+"\033[0m -->", tlogs[i][j]
 
@@ -869,9 +905,8 @@ def replace_known_patterns(tlogs):
                     is_date = False
 
                 if is_date:
-                    tlogs[i][j] = "~date_"+format(seqnum,'04d')+"~"
-                    seqnum += 1
-                    seqnum = seqnum % 1000
+                    tlogs[i][j] = "~date_"+format(_get_seqnum(),'04d')+"~"
+                    _set_seqnum((_get_seqnum()+1) % 1000)
                     #print "Date format reassigned as:",tlogs[i][j]
 
 
@@ -1096,9 +1131,8 @@ def apply_new_patterns(tlogs, next_pattern_index):
 # TODO: Combine this with apply_new_patterns() when both discovery paths use the same token-log storage.
 def apply_new_patterns_multiprocessing(tlogs):
     global tm002
-    global seqnum
 
-    compiled_patterns = [regex.compile("^"+p["pattern"]+"$") for p in discovered_patterns]
+    compiled_patterns = [regex.compile("^"+p["pattern"]+"$") for p in _get_discovered_patterns()]
     tm_checkpt = time.time()
     for i in range(0,len(tlogs)):
         tlog = tlogs[i]
@@ -1108,9 +1142,8 @@ def apply_new_patterns_multiprocessing(tlogs):
                 continue
             for pattern in compiled_patterns:
                 if pattern.match(word) is not None:
-                    tlogs[i][j] = "~CP"+format(seqnum,'09d')+"~"
-                    seqnum += 1
-                    seqnum = seqnum % MOD_FACTOR
+                    tlogs[i][j] = "~CP"+format(_get_seqnum(),'09d')+"~"
+                    _set_seqnum((_get_seqnum()+1) % MOD_FACTOR)
                     break
     tm002 += time.time()-tm_checkpt
 
@@ -2233,7 +2266,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
             break
 
         if len(max_runlen_positions)>1:
-            max_runlen_pos = max_runlen_positions[randint(0,len(max_runlen_positions)-1)]
+            max_runlen_pos = max_runlen_positions[_next_randint(0,len(max_runlen_positions)-1)]
         elif len(max_runlen_positions)==1:
             max_runlen_pos = max_runlen_positions[0]
 
@@ -2721,13 +2754,16 @@ reuse_logfilename="CODE50_REUSE_LOG.p"
 # Discovery execution backend.  Keep multiprocessing coordination in this
 # section so the CLI, candidate construction, matching, and leaf scoring stay
 # independent of the execution strategy.
-def run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count=1):
+def run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count=1, parallel_backend="process"):
     """Run template discovery with the selected execution strategy.
 
     The original Tree backend remains the default execution path.
     """
     if worker_count > 1 and not linear_mode:
-        return _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count)
+        if parallel_backend == "thread":
+            return _run_parallel_tree_discovery_thread(tree, log_dataset, all_tlogs, worker_count)
+        else:
+            return _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, worker_count)
     if worker_count > 1:
         print("--linear has no candidate branches; using the sequential discovery backend.")
     return _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode)
@@ -3114,7 +3150,7 @@ def _run_parallel_pool_worker_branch(node, branch_state, candidate, candidate_in
         return BranchResult("failure", branch_state=branch_state, failure_traceback=traceback.format_exc(), timers=_discovery_timer_snapshot())
 
 
-def _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count):
+def _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, worker_count):
     context = multiprocessing.get_context("fork")
 
     def initialize_worker(log_dataset, tokenized_log_store):
@@ -3197,6 +3233,152 @@ def _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, work
     tm001, tm002, tm003, tm004, tm005, tm006, tm007, tm008, tm009, tm010, tm011 = timer_totals
     return time.time()-runtime_checkpt
 
+
+# Thread-pool branch backend (--parallel-backend thread). Threads share the parent's
+# memory directly, so unlike the process backend above there is no pickling boundary:
+# all_tlogs never needs to be file-backed (branch tasks just index the in-memory list),
+# but every task also needs its own private deep copy of `node`/`branch_state` before
+# it starts running, since the process backend got that isolation for free from pickling
+# at submission time and threads do not.
+def _read_tokenized_log_sample_from_memory(all_tlogs, sample_indices):
+    return [all_tlogs[log_index] for log_index in sample_indices]
+
+
+def sample_by_token_length_and_space_count_thread(log_dataset, branch_state, node, all_tlogs):
+    most_popular = max(node.score_counts, key=node.score_counts.get)
+    sample_indices = []
+    for log_index in log_dataset.log_score_indices[most_popular]:
+        if node.all_vect[log_index] == -1 and log_dataset.log_scores[log_index] == most_popular:
+            sample_indices.append(log_index)
+            if len(sample_indices) >= 1000:
+                break
+    sampled_logs = [log_dataset.logs[log_index] for log_index in sample_indices]
+    tokenized_logs = _read_tokenized_log_sample_from_memory(all_tlogs, sample_indices)
+    return sampled_logs, tokenized_logs
+
+
+def _activate_thread_local_branch_state(branch_state):
+    _thread_local_discovery.active = True
+    _thread_local_discovery.discovered_patterns = branch_state.discovered_patterns
+    _thread_local_discovery.seqnum = branch_state.seqnum
+    rng = random.Random()
+    rng.setstate(branch_state.random_state)
+    _thread_local_discovery.rng = rng
+
+
+def _capture_thread_local_branch_state(branch_state):
+    branch_state.discovered_patterns = _thread_local_discovery.discovered_patterns
+    branch_state.seqnum = _thread_local_discovery.seqnum
+    branch_state.random_state = _thread_local_discovery.rng.getstate()
+    _thread_local_discovery.active = False
+
+
+def _run_branch_until_split_or_leaf_thread(node, branch_state, log_dataset, all_tlogs):
+    _activate_thread_local_branch_state(branch_state)
+    while -1 in node.all_vect:
+        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count_thread(log_dataset, branch_state, node, all_tlogs)
+        if len(sampled_logs) == 0:
+            break
+        replace_known_patterns(tokenized_logs)
+        apply_new_patterns_multiprocessing(tokenized_logs)
+        candidate_set = construct_candidate_log_templates(tokenized_logs, node.rep_logs)
+        if len(candidate_set) == 0:
+            raise RuntimeError("No candidate generated for branch "+str(branch_state.branch_path))
+        if len(candidate_set) > 1:
+            _capture_thread_local_branch_state(branch_state)
+            return candidate_set
+        _apply_linear_candidate(node, branch_state, candidate_set[0], log_dataset)
+    _capture_thread_local_branch_state(branch_state)
+    if not node.is_leaf_node() or -1 in node.all_vect:
+        raise RuntimeError("Branch stopped before covering all logs: "+str(branch_state.branch_path))
+    return None
+
+
+def _run_parallel_thread_worker_branch(log_dataset, all_tlogs, node, branch_state, candidate, candidate_index):
+    try:
+        branch_state.branch_path = branch_state.branch_path+(candidate_index,)
+        _activate_thread_local_branch_state(branch_state)
+        _apply_candidate_to_branch(node, branch_state, candidate, log_dataset)
+        _capture_thread_local_branch_state(branch_state)
+        candidate_set = _run_branch_until_split_or_leaf_thread(node, branch_state, log_dataset, all_tlogs)
+        if candidate_set is None:
+            return BranchResult("leaf", node=node, branch_state=branch_state, timers=(0.0,)*11)
+        return BranchResult("split", node=node, branch_state=branch_state, candidate_set=candidate_set, timers=(0.0,)*11)
+    except BaseException:
+        return BranchResult("failure", branch_state=branch_state, failure_traceback=traceback.format_exc(), timers=(0.0,)*11)
+
+
+def _run_parallel_tree_discovery_thread(tree, log_dataset, all_tlogs, worker_count):
+    root_node = tree.find_node("top")
+    root_branch_state = BranchState()
+    root_branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
+    root_branch_state.seqnum = seqnum
+    root_branch_state.random_state = random.getstate()
+    runtime_checkpt = time.time()
+    candidate_set = _run_branch_until_split_or_leaf_thread(root_node, root_branch_state, log_dataset, all_tlogs)
+    leaves = []
+    failures = []
+    global_patterns = copy.deepcopy(root_branch_state.discovered_patterns)
+    if candidate_set is None:
+        leaves.append({"branch_path":root_branch_state.branch_path,"node":root_node})
+    else:
+        event_queue = queue.Queue()
+        pending_branches = deque((root_node, root_branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(candidate_set))
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+        pending_count = 0
+
+        # Threads share memory with the parent, so (unlike Pool.apply_async, which
+        # implicitly deep-copies via pickling) node/branch_state must be explicitly
+        # deep-copied per task here -- otherwise sibling branch tasks spawned from the
+        # same split would mutate the same node/branch_state object concurrently.
+        def submit_available_branches():
+            nonlocal pending_count
+            while pending_count < worker_count and len(pending_branches) > 0:
+                node, branch_state, candidate, candidate_index = pending_branches.popleft()
+                task_node = copy.deepcopy(node)
+                task_branch_state = copy.deepcopy(branch_state)
+                task_branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                future = executor.submit(_run_parallel_thread_worker_branch, log_dataset, all_tlogs, task_node, task_branch_state, candidate, candidate_index)
+                def on_done(future):
+                    error = future.exception()
+                    if error is None:
+                        event_queue.put(future.result())
+                    else:
+                        event_queue.put(BranchResult("failure", failure_traceback=repr(error), timers=(0.0,)*11))
+                future.add_done_callback(on_done)
+                pending_count += 1
+
+        try:
+            submit_available_branches()
+            while pending_count > 0:
+                result = event_queue.get()
+                pending_count -= 1
+                if result.branch_status == "leaf":
+                    _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                    leaves.append({"branch_path":result.branch_state.branch_path,"node":result.node})
+                elif result.branch_status == "split":
+                    _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                    result.branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                    pending_branches.extend((result.node, result.branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(result.candidate_set))
+                else:
+                    failures.append(result)
+                    break
+                submit_available_branches()
+        finally:
+            # Python threads cannot be force-killed: on failure this only stops
+            # not-yet-started tasks, already-running branch threads finish in the background.
+            executor.shutdown(wait=True, cancel_futures=len(failures) > 0)
+    if len(failures) > 0:
+        failure = failures[0]
+        failure_path = "unknown" if failure.branch_state is None else failure.branch_state.branch_path
+        raise RuntimeError("Parallel branch failed at "+str(failure_path)+"\n"+failure.failure_traceback)
+    discovered_patterns[:] = copy.deepcopy(global_patterns)
+    print("Final custom pattern count:", len(discovered_patterns))
+    print("Note: thread backend does not track per-phase timing breakdown; only wall-clock total is meaningful.")
+    _rebuild_tree_from_leaves(tree, log_dataset.log_count, leaves)
+    return time.time()-runtime_checkpt
+
+
 if __name__ == '__main__':
     debug_mode = False
     openfile_list = []
@@ -3206,6 +3388,7 @@ if __name__ == '__main__':
         parser.add_argument('--debug',  action='store_true', required=False, help='When specified, it walks through each log processing and print out messages.')
         parser.add_argument('--linear',  action='store_true', required=False, help='Whether to follow linear execution path along the tree or not.')
         parser.add_argument('--workers', type=int, default=1, help='Maximum concurrent candidate branches (default: 1).')
+        parser.add_argument('--parallel-backend', choices=['process', 'thread'], default='process', help='Execution backend for --workers > 1 (default: process).')
         parser.add_argument('--seed', type=int, required=False, help='Seed Python and NumPy random generators for reproducible discovery.')
         # Now, we don't need clean mode
         parser.add_argument('--clean',  action='store_true', required=False, help='When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.')
@@ -3311,7 +3494,7 @@ if __name__ == '__main__':
     root_node = tree.create_node("TOP", log_dataset.log_count, "top")
     root_node.score_counts = dict(Counter(all_log_scores))
 
-    discovery_elapsed = run_tree_discovery(tree, log_dataset, all_tlogs,  linear_mode, args.workers)
+    discovery_elapsed = run_tree_discovery(tree, log_dataset, all_tlogs,  linear_mode, args.workers, args.parallel_backend)
     parallel_mode = args.workers > 1 and not linear_mode
     if parallel_mode:
         print("Timing mode: aggregate worker work; wall-clock runtime is reported below.")
