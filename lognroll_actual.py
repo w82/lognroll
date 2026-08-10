@@ -3,7 +3,6 @@
 
 import os
 import regex
-import ast
 import sys
 import copy
 import time
@@ -11,9 +10,17 @@ import uuid
 import numpy
 import argparse
 import pickle
+import random
+import threading
+import multiprocessing
+import concurrent.futures
+import traceback
+import queue
+import gc
+import tempfile
 from scipy import stats
 from random import randint
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime
 
 global debug_mode
@@ -42,6 +49,44 @@ MISSING_TOKEN="<MISSING>"
 seqnum=1
 
 
+# Thread-pool branch backend (--parallel-backend thread) support. The sequential and
+# process-pool backends keep using the plain module globals above directly (each process
+# has its own memory, so that adapter is safe there); a thread-pool worker instead reads
+# and writes the thread-local copies below so concurrent branch threads cannot stomp on
+# each other's discovered_patterns/seqnum/random state. See _get_seqnum() etc. below.
+_thread_local_discovery = threading.local()
+
+
+def _thread_local_discovery_active():
+    return getattr(_thread_local_discovery, "active", False)
+
+
+def _get_discovered_patterns():
+    if _thread_local_discovery_active():
+        return _thread_local_discovery.discovered_patterns
+    return discovered_patterns
+
+
+def _get_seqnum():
+    if _thread_local_discovery_active():
+        return _thread_local_discovery.seqnum
+    return seqnum
+
+
+def _set_seqnum(value):
+    if _thread_local_discovery_active():
+        _thread_local_discovery.seqnum = value
+    else:
+        global seqnum
+        seqnum = value
+
+
+def _next_randint(a, b):
+    if _thread_local_discovery_active():
+        return _thread_local_discovery.rng.randint(a, b)
+    return randint(a, b)
+
+
 
 MOD_FACTOR = 32
 
@@ -62,6 +107,54 @@ def sanitize_id(id):
 
 (_ADD, _DELETE, _INSERT) = list(range(3))
 (_ROOT, _DEPTH, _WIDTH) = list(range(3))
+
+class LogDataset:
+    """Read-only logs and sampling indexes shared by discovery branches.
+
+    logs[i] is one preprocessed log, log_scores[i] is its score, and log_score_indices[score] lists every matching log index i.
+    """
+
+    def __init__(self, log_count, logs, log_scores, log_score_indices):
+        self.log_count = log_count
+        self.logs = logs
+        self.log_scores = log_scores
+        self.log_score_indices = log_score_indices
+
+
+class TokenizedLogFileStore:
+    """Store all tokenized logs in a temporary file and load requested logs by index."""
+
+    def __init__(self, filename, offsets):
+        self.filename = filename
+        self.offsets = offsets
+        self.file_handle = None
+
+    @classmethod
+    def write(cls, all_tlogs, directory):
+        filename = os.path.join(directory, "tokenized-logs.pickle")
+        offsets = []
+        with open(filename, "wb") as file_handle:
+            for tlog in all_tlogs:
+                offsets.append(file_handle.tell())
+                pickle.dump(tlog, file_handle, pickle.HIGHEST_PROTOCOL)
+        return cls(filename, offsets)
+
+    def open(self):
+        if self.file_handle is None:
+            self.file_handle = open(self.filename, "rb")
+
+    def read(self, log_index):
+        self.open()
+        self.file_handle.seek(self.offsets[log_index])
+        return pickle.load(self.file_handle)
+
+    def close(self):
+        if self.file_handle is not None:
+            self.file_handle.close()
+            self.file_handle = None
+
+    def __getstate__(self):
+        return {"filename":self.filename, "offsets":self.offsets, "file_handle":None}
 
 class Node:
 
@@ -285,7 +378,6 @@ def split_by_delimiter(lvl, str_data, delim):
         if debug_mode and len(tok)==0:
             print(" "*lvl+"\033[0;31m"+"WARNING 742: zero length token detected -"+"\033[0m", str_data)
             print(" "*(lvl+4), tokenized)
-            print(log)
             sys.exit(0)
             continue
 
@@ -476,8 +568,6 @@ def is_all_floatingpoint(numlist):
 
 def follows_format(klist):
 
-    global smask
-
     #if debug_mode:
     #    print "        [follows_format()] Entering. len=",len(klist)
 
@@ -540,16 +630,17 @@ def follows_format(klist):
         return False
 
 
-    pat = { "pattern": smask, "label":"~"+str(400+len(discovered_patterns))+"~"}
+    patterns = _get_discovered_patterns()
+    pat = { "pattern": smask, "label":"~"+str(400+len(patterns))+"~"}
 
     pattern_exists = False
-    for p in discovered_patterns:
+    for p in patterns:
         if p["pattern"]==smask:
             pattern_exists = True
             pat = p
             break
     if not pattern_exists:
-        discovered_patterns.append(pat)
+        patterns.append(pat)
 
     return True
 
@@ -770,8 +861,6 @@ def preprocess_known_patterns(logs):
 
 
 def replace_known_patterns(tlogs):
-    global seqnum
-
     for i in range(0,len(tlogs)):
         tlog = tlogs[i]
 
@@ -797,9 +886,8 @@ def replace_known_patterns(tlogs):
                 if matched!=None:
 
                     #tlogs[i][j] = pat["label"]
-                    tlogs[i][j] = "~AB"+format(seqnum,'09d')+"~"
-                    seqnum += 1
-                    seqnum = seqnum % MOD_FACTOR
+                    tlogs[i][j] = "~AB"+format(_get_seqnum(),'09d')+"~"
+                    _set_seqnum((_get_seqnum()+1) % MOD_FACTOR)
 
                     #print "\033[0;35m"+matched.group(0)+"\033[0m -->", tlogs[i][j]
 
@@ -817,9 +905,8 @@ def replace_known_patterns(tlogs):
                     is_date = False
 
                 if is_date:
-                    tlogs[i][j] = "~date_"+format(seqnum,'04d')+"~"
-                    seqnum += 1
-                    seqnum = seqnum % 1000
+                    tlogs[i][j] = "~date_"+format(_get_seqnum(),'04d')+"~"
+                    _set_seqnum((_get_seqnum()+1) % 1000)
                     #print "Date format reassigned as:",tlogs[i][j]
 
 
@@ -1039,6 +1126,26 @@ def apply_new_patterns(tlogs, next_pattern_index):
     tm002 += elapsed
     #print "    [apply_new_patterns()] Done converting. It took", elapsed, "seconds"
     return len(discovered_patterns)
+
+
+# TODO: Combine this with apply_new_patterns() when both discovery paths use the same token-log storage.
+def apply_new_patterns_multiprocessing(tlogs):
+    global tm002
+
+    compiled_patterns = [regex.compile("^"+p["pattern"]+"$") for p in _get_discovered_patterns()]
+    tm_checkpt = time.time()
+    for i in range(0,len(tlogs)):
+        tlog = tlogs[i]
+        for j in range(0,len(tlog)):
+            word = tlog[j]
+            if word in [' ',':',',','=','<','>']:
+                continue
+            for pattern in compiled_patterns:
+                if pattern.match(word) is not None:
+                    tlogs[i][j] = "~CP"+format(_get_seqnum(),'09d')+"~"
+                    _set_seqnum((_get_seqnum()+1) % MOD_FACTOR)
+                    break
+    tm002 += time.time()-tm_checkpt
 
 
 def Determine_runlen_filter_word(token_d, tlogs, ftwords):
@@ -2159,7 +2266,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
             break
 
         if len(max_runlen_positions)>1:
-            max_runlen_pos = max_runlen_positions[randint(0,len(max_runlen_positions)-1)]
+            max_runlen_pos = max_runlen_positions[_next_randint(0,len(max_runlen_positions)-1)]
         elif len(max_runlen_positions)==1:
             max_runlen_pos = max_runlen_positions[0]
 
@@ -2308,23 +2415,6 @@ def lcs(S,T):
 
 
 def _pair_lcs_length_sum(template_a, template_b, pair_cache):
-    # TODO: Compare token sequences directly to remove basechar encoding and template truncation.
-    basechar="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()_+[]\{}|;:,./<>?`~=-ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■"
-
-    if len(template_a)>len(basechar):
-        print("\n\n    Number of tokens in the template:",len(template_a))
-        print("    Length of basechar:",len(basechar))
-        print("    "+str(template_a))
-        print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
-        del template_a[len(basechar)-1:]
-
-    if len(template_b)>len(basechar):
-        print("\n\n    Number of tokens in the template:",len(template_b))
-        print("    Length of basechar:",len(basechar))
-        print("    "+str(template_b))
-        print("    \033[1;31mTemplate too long. Truncating to match the basechar length.\033[0m")
-        del template_b[len(basechar)-1:]
-
     key_a = tuple(template_a)
     key_b = tuple(template_b)
     # Use the same cache key regardless of template order.
@@ -2341,7 +2431,7 @@ def _pair_lcs_length_sum(template_a, template_b, pair_cache):
     for tok in key_a + key_b:
         if tok in token_d:
             continue
-        token_d[tok] = basechar[n]
+        token_d[tok] = chr(n)
         n += 1
 
     str_a = "".join(token_d[tok] for tok in key_a)
@@ -2412,17 +2502,72 @@ def compute_slcpl(logtem, pair_cache):
 
 
 
-def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
-    # Keep valid templates from this leaf for scoring.
-    selected = []
-    for t in leaf_node.log_templates:
+def tokenize_template_for_slcl(template):
+    static_template = template.replace(".*","")
+    unescaped_template = regex.sub("\\\\","",static_template)
+    return unescaped_template.split()
+
+
+def _get_template_coverage(template,logs,coverage_cache):
+    # Return this final regex's full-corpus match bitmap and raw match count.
+    if template in coverage_cache:
+        return coverage_cache[template]
+    matcher = regex.compile("^"+template+"$")
+    coverage_bytes = bytearray((len(logs)+7)//8)
+    match_count = 0
+    for log_index,log in enumerate(logs):
+        if matcher.match(log) is None:
+            continue
+        coverage_bytes[log_index//8] |= 1 << (log_index%8)
+        match_count += 1
+    result = (int.from_bytes(coverage_bytes,byteorder="little"),match_count)
+    coverage_cache[template] = result
+    return result
+
+
+def _build_effective_template_set(log_templates,logs,coverage_cache):
+    candidates = []
+    for t in log_templates:
         if t is None:
             continue
-        if t["count"]>0:
-            selected.append({
-                "count":int(t["count"]),
-                "template":str(t["template"]),
-            })
+        template = str(t["template"])
+        coverage,match_count = _get_template_coverage(template,logs,coverage_cache)
+        if match_count>0:
+            candidates.append({"template":template,"coverage":coverage,"match_count":match_count})
+    candidates.sort(key=lambda candidate:(candidate["match_count"],candidate["template"]),reverse=True)
+    selected = []
+    covered = 0
+    matched_count = 0
+    for candidate in candidates:
+        newly_covered = candidate["coverage"] & ~covered
+        newly_matched_count = bin(newly_covered).count("1")
+        if newly_matched_count==0:
+            continue
+        selected.append({"count":newly_matched_count,"template":candidate["template"]})
+        covered |= candidate["coverage"]
+        matched_count += newly_matched_count
+    return selected,matched_count
+
+
+class LeafScore:
+
+    def __init__(self,node,selected,sum_matched,log_count,sl,cpl,score):
+        self.node = node
+        self.selected = selected
+        self.sum_matched = sum_matched
+        self.log_count = log_count
+        self.sl = sl
+        self.cpl = cpl
+        self.score = score
+
+    @property
+    def remaining_count(self):
+        return self.log_count-self.sum_matched
+
+
+def _evaluate_leaf(leaf_node, logs, score_cache, pair_cache, scoring_token_cache, coverage_cache):
+    # Rebuild the effective set from full-corpus regex coverage.
+    selected,sum_matched = _build_effective_template_set(leaf_node.log_templates,logs,coverage_cache)
 
     if len(selected)==0:
         return None
@@ -2436,9 +2581,7 @@ def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
         for t in selected:
             template = t['template']
             if template not in scoring_token_cache:
-                scoring_token_cache[template] = tuple(
-                    do_tokenization([template.replace(".*","")])[0]
-                )
+                scoring_token_cache[template] = tuple(tokenize_template_for_slcl(template))
             scoring_templates.append({
                 "count":t["count"],
                 "template":scoring_token_cache[template],
@@ -2448,18 +2591,10 @@ def _evaluate_leaf(leaf_node, score_cache, pair_cache, scoring_token_cache):
         SL,CPL = compute_slcpl(scoring_templates,pair_cache)
         if score_cache is not None:
             score_cache[score_key] = (SL,CPL)
-    return {
-        "node": leaf_node,
-        "selected": selected,
-        "sum_matched": sum(t["count"] for t in selected),
-        "remaining_count": leaf_node.all_vect.count(-1),
-        "SL": SL,
-        "CPL": CPL,
-        "score": SL-CPL,
-    }
+    return LeafScore(leaf_node,selected,sum_matched,len(logs),SL,CPL,SL-CPL)
 
 
-def _select_best_leaf(tree):
+def _select_best_leaf(tree, logs):
     leaf_nodes = []
     for leaf_node in tree.nodes:
         if not leaf_node.is_leaf_node():
@@ -2475,6 +2610,7 @@ def _select_best_leaf(tree):
     score_cache = {}
     pair_cache = {}
     scoring_token_cache = {}
+    coverage_cache = {}
     for leaf_index, leaf_node in enumerate(leaf_nodes):
 
         print(
@@ -2482,29 +2618,25 @@ def _select_best_leaf(tree):
             str(leaf_index+1)+"/"+str(len(leaf_nodes))+":"
         )
         leaf_node.print_node()
-        result = _evaluate_leaf(
-            leaf_node,
-            score_cache,
-            pair_cache,
-            scoring_token_cache,
-        )
+        result = _evaluate_leaf(leaf_node,logs,score_cache,pair_cache,scoring_token_cache,coverage_cache)
         if result is None:
             print("Skipping leaf with no effective templates:", leaf_node.name)
             continue
 
-        print("    Sum of matched logs:", result["sum_matched"])
-        print("   ",result["remaining_count"],"logs remaining.")
+        print("    Sum of matched logs:", result.sum_matched)
+        print("   ",result.remaining_count,"logs remaining.")
         print("    Initial template count:", len(leaf_node.log_templates))
-        print("    Selected template count:", len(result["selected"]))
-        print("    SL= "+str(result["SL"]))
-        print("    CPL= "+str(result["CPL"]))
-        print("    score= "+str(result["score"]))
+        print("    Selected template count:", len(result.selected))
+        print("    SL= "+str(result.sl))
+        print("    CPL= "+str(result.cpl))
+        print("    score= "+str(result.score))
 
-        if best_result is None or result["score"]>best_result["score"]:
+        if best_result is None or result.score>best_result.score:
             best_result = result
 
     print("Cached leaf score sets:",len(score_cache))
     print("Cached template-pair scores:",len(pair_cache))
+    print("Cached template coverages:",len(coverage_cache))
 
     return best_result
 
@@ -2616,133 +2748,36 @@ prepopulated_log_templates = [
 prepopulated_log_templates = []
 #rep_logs = [] 
 
-processed_count=0
 reuse_filename="CODE50_REUSE.p"
 reuse_logfilename="CODE50_REUSE_LOG.p"
 
-if __name__ == '__main__':
+# Discovery execution backend.  Keep multiprocessing coordination in this
+# section so the CLI, candidate construction, matching, and leaf scoring stay
+# independent of the execution strategy.
+def run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count=1, parallel_backend="process"):
+    """Run template discovery with the selected execution strategy.
 
-    # global debug_mode
-    global new_pattern_added
-    debug_mode = False
-
-    openfile_list = []
-    try:
-        parser = argparse.ArgumentParser(description="")
-        parser.add_argument('--logfile',  type=argparse.FileType('r'), nargs='+', required=True, help='List of one or more input log files')
-        parser.add_argument('--debug',  action='store_true', required=False, help='When specified, it walks through each log processing and print out messages.')
-        parser.add_argument('--linear',  action='store_true', required=False, help='Whether to follow linear execution path along the tree or not.')
-        # Now, we don't need clean mode
-        parser.add_argument('--clean',  action='store_true', required=False, help='When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.')
-
-        args = parser.parse_args()
-        args.clean = True
-        openfile_list = args.logfile
-        if len(openfile_list)>1:
-            print("Specify only one log file. Currently",len(openfile_list),"are given.")
-            sys.exit(0)
-
-        debug_mode = False
-        if args.debug==False:
-            debug_mode = False
+    The original Tree backend remains the default execution path.
+    """
+    if worker_count > 1 and not linear_mode:
+        if parallel_backend == "thread":
+            return _run_parallel_tree_discovery_thread(tree, log_dataset, all_tlogs, worker_count)
         else:
-            debug_mode = bool(args.debug)
-        
-        linear_mode = False
-        if args.linear==False:
-            linear_mode = False
-        else: 
-            linear_mode = bool(args.linear)
-            
-        if os.path.exists(reuse_logfilename):
-            prev_reuse_logfilename = pickle.load(open(reuse_logfilename,"r"))
-        else:
-            prev_reuse_logfilename = "-" 
-
-        print("** Previous log file:",prev_reuse_logfilename)
-        print("**    Input log file:",openfile_list[0].name)
-
-        clean_mode = False
-        if args.clean==False:
-            if prev_reuse_logfilename==openfile_list[0].name:
-               clean_mode = False
-               print("\033[2;102mNon-Clean (cache reuse, fast) mode\033[0m")
-            else:
-                print("\033[31;91mAlthough you wanted FAST REUSE mode, the input log file is different from the previous run. Forcing clean mode ... \033[0m")
-                print("\033[37;101mClean (slow) mode\033[0m")
-                clean_mode = True
-                os.remove(reuse_logfilename)
-                pickle.dump(openfile_list[0].name, open(reuse_logfilename,"w"))
-        else:
-            print("\033[37;101mClean (slow) mode\033[0m")
-            clean_mode = bool(args.clean)
+            return _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, worker_count)
+    if worker_count > 1:
+        print("--linear has no candidate branches; using the sequential discovery backend.")
+    return _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode)
 
 
-    except Exception as e:
-        print(('Error: %s' % str(e)))
-
-    print("Loading all logs into memory.")
-    raw_logs = read_log_files( openfile_list, None ) 
-
-    old_log_count = len(raw_logs)
-    rep_logs = remove_log_template_matches(raw_logs, prepopulated_log_templates)
-    print("==================================================================================================================================")
-    print("Old Log count:",old_log_count)
-    print("New Log count:",len(raw_logs))
-    print("Prepopulated log template count:", len(prepopulated_log_templates))
-    print("Representative logs count:", len(rep_logs))
-    log_templates = copy.deepcopy(prepopulated_log_templates)
-
-    print("Preprocessing logs...")
-    all_logs = preprocess_known_patterns(raw_logs) 
-                                                   
-
-    if clean_mode:
-        if os.path.exists(reuse_filename):
-            os.remove(reuse_filename)
-
-    if os.path.exists(reuse_filename):
-        print("Reusing reuse file ...")
-        all_tlogs = pickle.load(open(reuse_filename,"rb"))
-    else:
-        print("Sequence number:", seqnum)
-        print("Tokenizing all logs.")
-        all_tlogs = do_tokenization(all_logs)
-        print("Done tokenizing.", len(all_logs))
-
-        #apply_all_patterns(all_tlogs)
-        print("Rearranging numbers of known patterns to make values unique ...")
-        uniquify_numbers(all_tlogs)
-        print("Done rearranging values.")
-        print("len(all_tlogs):",len(all_tlogs))
-
-        pickle.dump(all_tlogs, open(reuse_filename,"wb"))
-
-    #print " "
-    #if len(all_tlogs)<30:
-    #    cnt = 1
-    #    for x in all_tlogs:
-    #            print "   \033[1;34m","("+str(cnt)+")", "".join(x), "\033[0m "
-    #            cnt += 1
-
-    # Maps each log index to its immutable score.
-    # Example: all_log_scores[7] == 3004; mark_matched_logs() decrements score_counts[3004].
-    all_log_scores = build_log_scores(all_logs)
-    # Maps each score to its original log indices.
-    # Example: all_log_score_indices[3004] == [1, 7]; sampling uses it for most_popular.
-    all_log_score_indices = build_log_score_index(all_log_scores)
-
-    tree = Tree()
-    root_node = tree.create_node("TOP", len(raw_logs), "top")
-    root_node.score_counts = dict(Counter(all_log_scores))
+def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
+    """Run the existing Tree-based Sequential Covering search to completion."""
     cur_node = tree.find_inprogress_node()
     next_pattern_index = len(discovered_patterns)
-
     runtime_checkpt = time.time()
-    #while all_vect.count(-1)>0:
+
     while -1 in cur_node.all_vect:
 
-        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(all_logs, all_tlogs, cur_node.all_vect, all_log_scores, cur_node.score_counts, all_log_score_indices)
+        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count(log_dataset.logs, all_tlogs, cur_node.all_vect, log_dataset.log_scores, cur_node.score_counts, log_dataset.log_score_indices)
         #sampled_logs = random_sample_logs(all_logs, RANDOM_SAMPLE_SIZE)
         #sampled_logs = sample_by_length(all_logs, all_vect, RANDOM_SAMPLE_SIZE)
         #sampled_logs = sample_by_signature(all_logs, RANDOM_SAMPLE_SIZE)
@@ -2794,7 +2829,7 @@ if __name__ == '__main__':
 
                 new_name = 'n'+str(tree.serial)
                 new_identifier  = 'i'+str(tree.serial)
-                tree.create_node( new_name, len(raw_logs), new_identifier, parent=cur_node.identifier)
+                tree.create_node( new_name, log_dataset.log_count, new_identifier, parent=cur_node.identifier)
                 tree.serial += 1
     
                 new_node = tree.find_node(new_identifier)
@@ -2807,11 +2842,11 @@ if __name__ == '__main__':
                 new_node.print_node()
     
                 # Mark matched logs from all_logs using new log template. 
-                removed_count = mark_matched_logs(all_logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates), new_node.score_counts, all_log_scores)
+                removed_count = mark_matched_logs(log_dataset.logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates), new_node.score_counts, log_dataset.log_scores)
                 if removed_count==0:
                     print("\n\033[1;94mWARNING[1]:\033[0m No logs removed from the template!")
                     print("TEMPLATE->",log_template)
-                    print("Remaining logs:", len(all_logs)-sum(1 for x in cur_node.all_vect if x>0))
+                    print("Remaining logs:", log_dataset.log_count-sum(1 for x in cur_node.all_vect if x>0))
                     print("Log template count:", len(cur_node.log_templates))
                     for p in standalone_patterns:
                         print(p['label'],p['pattern'])
@@ -2852,18 +2887,18 @@ if __name__ == '__main__':
                         print("   Token to update:", tok_candi[diff_loc])
                         print("   Token to update:", tok_logtm[diff_loc])
                         tok_logtm[diff_loc]=".*"
-                        log_template = "".join(".*".join(regex.escape(part) for part in token.split(".*")) for token in tok_logtm)
+                        log_template = generate_log_template_star(tok_logtm,True)
                         tok_candi = tokenize_log_template(log_template)
                         print("   New log_template:", log_template)
                         merged_template_indices.append(i)
                         cur_node.log_templates[i]=None
                         cur_node.rep_logs[i]=None
 
-            removed_count = mark_matched_logs(all_logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates), cur_node.score_counts, all_log_scores)
+            removed_count = mark_matched_logs(log_dataset.logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates), cur_node.score_counts, log_dataset.log_scores)
             if removed_count==0:
                 print("\n\033[1;95mWARNING[2]:\033[0m \033[1;31mNo logs removed from the template!", "\033[0m")
                 print("   *TEMPLATE->",log_template)
-                print("   *Remaining logs:", len(all_logs)-sum(1 for x in cur_node.all_vect if x>0))
+                print("   *Remaining logs:", log_dataset.log_count-sum(1 for x in cur_node.all_vect if x>0))
                 print("   *Log template count:", len(cur_node.log_templates))
                 for p in standalone_patterns:
                     print("   ",p['label'],p['pattern'])
@@ -2910,9 +2945,559 @@ if __name__ == '__main__':
         #print "============================================================================================================="
         #raw_input("\033[1;94m->Press ENTER to continue ...\033[0m")
 
-    # END of outer while loop - done removing all the logs
-    discovery_elapsed = time.time() - runtime_checkpt
+    print("Final custom pattern count:", len(discovered_patterns))
+    return time.time() - runtime_checkpt
 
+
+# Branch-level multiprocessing backend. This is reached only from the dispatcher
+# above; the original sequential Tree backend remains untouched.
+class BranchState:
+
+    def __init__(self, branch_path=()):
+        self.branch_path = branch_path
+        self.discovered_patterns = []
+        self.seqnum = 1
+        self.random_state = None
+
+
+class BranchResult:
+    """Outcome returned by one branch task run in a multiprocessing Pool worker."""
+
+    def __init__(self, branch_status, node=None, branch_state=None, candidate_set=None, failure_traceback=None, timers=None):
+        self.branch_status = branch_status
+        self.node = node
+        self.branch_state = branch_state
+        self.candidate_set = candidate_set
+        self.failure_traceback = failure_traceback
+        self.timers = timers
+
+
+def _reset_discovery_timers():
+    global tm001, tm002, tm003, tm004, tm005, tm006, tm007, tm008, tm009, tm010, tm011
+    tm001 = tm002 = tm003 = tm004 = tm005 = tm006 = tm007 = tm008 = tm009 = tm010 = tm011 = 0.0
+
+
+def _discovery_timer_snapshot():
+    return (tm001, tm002, tm003, tm004, tm005, tm006, tm007, tm008, tm009, tm010, tm011)
+
+
+def _add_discovery_timers(totals, values):
+    for index, value in enumerate(values):
+        totals[index] += value
+
+
+# TODO: Remove this global-state adapter after legacy discovery functions accept branch_state directly.
+def _activate_branch_state(branch_state):
+    global discovered_patterns, seqnum
+    discovered_patterns = copy.deepcopy(branch_state.discovered_patterns)
+    seqnum = branch_state.seqnum
+    random.setstate(branch_state.random_state)
+
+
+# TODO: Remove with _activate_branch_state after legacy discovery functions accept branch_state directly.
+def _capture_branch_state(branch_state):
+    branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
+    branch_state.seqnum = seqnum
+    branch_state.random_state = random.getstate()
+
+
+def _read_tokenized_log_sample_from_store(tokenized_log_store, sample_indices):
+    """Load only the selected tokenized logs from the temporary file by original log index."""
+    global tm006
+    tm_checkpt = time.time()
+    tokenized_logs = []
+    for log_index in sample_indices:
+        tokenized_logs.append(tokenized_log_store.read(log_index))
+    elapsed = time.time() - tm_checkpt
+    tm006 += elapsed
+    return tokenized_logs
+
+
+# TODO: Combine this with sample_by_token_length_and_space_count() when both paths use the same token-log storage.
+def sample_by_token_length_and_space_count_multiprocessing(log_dataset, branch_state, node, tokenized_log_store):
+    most_popular = max(node.score_counts, key=node.score_counts.get)
+    sample_indices = []
+    for log_index in log_dataset.log_score_indices[most_popular]:
+        if node.all_vect[log_index] == -1 and log_dataset.log_scores[log_index] == most_popular:
+            sample_indices.append(log_index)
+            if len(sample_indices) >= 1000:
+                break
+    sampled_logs = [log_dataset.logs[log_index] for log_index in sample_indices]
+    tokenized_logs = _read_tokenized_log_sample_from_store(tokenized_log_store, sample_indices)
+    return sampled_logs, tokenized_logs
+
+
+# Merge patterns discovered by one branch into the shared global list, deduplicated by regex.
+def _merge_branch_patterns(global_patterns, branch_patterns):
+    known_patterns = {pattern["pattern"] for pattern in global_patterns}
+    for pattern in branch_patterns:
+        if pattern["pattern"] not in known_patterns:
+            global_patterns.append(copy.deepcopy(pattern))
+            known_patterns.add(pattern["pattern"])
+    global_patterns.sort(key=lambda pattern:pattern["pattern"])
+
+
+def _apply_candidate_to_branch(node, branch_state, log_template, log_dataset):
+    if exist_match(log_template, node.rep_logs) >= 0:
+        raise RuntimeError("candidate overlaps with an existing template: "+str(log_template))
+    removed_count = mark_matched_logs(log_dataset.logs, node.all_vect, node.rep_logs, log_template, len(node.log_templates), node.score_counts, log_dataset.log_scores)
+    if removed_count == 0:
+        raise RuntimeError("split candidate removed no logs in branch "+str(branch_state.branch_path)+": "+str(log_template))
+    node.log_templates.append({"count":removed_count,"template":log_template})
+    print("["+format(len(node.log_templates)-1,'3d')+"]", format(node.all_vect.count(-1),'5d'), format(removed_count,'4d'), log_template)
+
+
+def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
+    tok_candi = tokenize_log_template(log_template)
+    merged_template_indices = []
+    for index, old_template in enumerate(node.log_templates):
+        if old_template is None:
+            continue
+        tok_logtm = tokenize_log_template(old_template["template"])
+        if len(tok_candi) != len(tok_logtm):
+            continue
+        diff_locations = [position for position in range(len(tok_candi)) if tok_candi[position] != tok_logtm[position]]
+        if len(diff_locations) != 1:
+            continue
+        tok_logtm[diff_locations[0]] = ".*"
+        log_template = generate_log_template_star(tok_logtm,True)
+        tok_candi = tokenize_log_template(log_template)
+        merged_template_indices.append(index)
+        node.log_templates[index] = None
+        node.rep_logs[index] = None
+    removed_count = mark_matched_logs(log_dataset.logs, node.all_vect, node.rep_logs, log_template, len(node.log_templates), node.score_counts, log_dataset.log_scores)
+    if removed_count == 0:
+        raise RuntimeError("linear candidate removed no logs in branch "+str(branch_state.branch_path)+": "+str(log_template))
+    for position, template_index in enumerate(node.all_vect):
+        if template_index in merged_template_indices:
+            node.all_vect[position] = len(node.log_templates)
+            removed_count += 1
+    node.log_templates.append({"count":removed_count,"template":log_template})
+    print(len(node.log_templates)-1, removed_count, "\033[0;34m"+log_template+"\033[0m")
+
+
+def _run_branch_until_split_or_leaf(node, branch_state, log_dataset, tokenized_log_store):
+    _activate_branch_state(branch_state)
+    while -1 in node.all_vect:
+        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count_multiprocessing(log_dataset, branch_state, node, tokenized_log_store)
+        if len(sampled_logs) == 0:
+            break
+        if debug_mode:
+            print("\033[93;100mSampled_logs size:", len(sampled_logs),"\033[0m ")
+            for i in range(0,len(sampled_logs)):
+                print("    [Sampled]", sampled_logs[i])
+                print("             ", "".join(tokenized_logs[i]))
+            print("Number of logs:",len(sampled_logs))
+            print("Number of tokenized logs:",len(tokenized_logs))
+        replace_known_patterns(tokenized_logs)
+        apply_new_patterns_multiprocessing(tokenized_logs)
+        candidate_set = construct_candidate_log_templates(tokenized_logs, node.rep_logs)
+        if len(candidate_set) == 0:
+            raise RuntimeError("No candidate generated for branch "+str(branch_state.branch_path))
+        if len(candidate_set) > 1:
+            _capture_branch_state(branch_state)
+            return candidate_set
+        _apply_linear_candidate(node, branch_state, candidate_set[0], log_dataset)
+        if debug_mode:
+            input("\033[1;94m->Press ENTER to continue ...\033[0m")
+    _capture_branch_state(branch_state)
+    if not node.is_leaf_node() or -1 in node.all_vect:
+        raise RuntimeError("Branch stopped before covering all logs: "+str(branch_state.branch_path))
+    return None
+
+
+def _rebuild_tree_from_leaves(tree, log_count, leaves):
+    tree.nodes = []
+    tree.serial = 0
+    root_node = tree.create_node("TOP", log_count, "top")
+    leaves_by_path = {tuple(leaf["branch_path"]):leaf["node"] for leaf in leaves}
+    identifiers = {():root_node.identifier}
+    # Walk each leaf from root to leaf; reuse shared parents created by earlier paths.
+    for leaf_path in sorted(leaves_by_path):
+        for depth in range(1,len(leaf_path)+1):
+            branch_path = leaf_path[:depth]
+            if branch_path in identifiers:
+                continue
+            identifier = "i"+str(tree.serial)
+            tree.create_node("n"+str(tree.serial), log_count, identifier, parent=identifiers[branch_path[:-1]])
+            identifiers[branch_path] = identifier
+            tree.serial += 1
+    for leaf_path, leaf_node in leaves_by_path.items():
+        node = tree.find_node(identifiers[leaf_path])
+        node.log_templates = leaf_node.log_templates
+        node.rep_logs = leaf_node.rep_logs
+        node.all_vect = leaf_node.all_vect
+        node.score_counts = leaf_node.score_counts
+
+
+# Each Pool worker initializes these once before it starts processing branch tasks.
+pool_log_dataset = None
+pool_tokenized_log_store = None
+
+
+def _run_parallel_pool_worker_branch(node, branch_state, candidate, candidate_index):
+    try:
+        _reset_discovery_timers()
+        branch_state.branch_path = branch_state.branch_path+(candidate_index,)
+        _activate_branch_state(branch_state)
+        _apply_candidate_to_branch(node, branch_state, candidate, pool_log_dataset)
+        _capture_branch_state(branch_state)
+        candidate_set = _run_branch_until_split_or_leaf(node, branch_state, pool_log_dataset, pool_tokenized_log_store)
+        if candidate_set is None:
+            return BranchResult("leaf", node=node, branch_state=branch_state, timers=_discovery_timer_snapshot())
+        return BranchResult("split", node=node, branch_state=branch_state, candidate_set=candidate_set, timers=_discovery_timer_snapshot())
+    except BaseException:
+        return BranchResult("failure", branch_state=branch_state, failure_traceback=traceback.format_exc(), timers=_discovery_timer_snapshot())
+
+
+def _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, worker_count):
+    context = multiprocessing.get_context("fork")
+
+    def initialize_worker(log_dataset, tokenized_log_store):
+        global pool_log_dataset, pool_tokenized_log_store
+        pool_log_dataset = log_dataset
+        pool_tokenized_log_store = tokenized_log_store
+        pool_tokenized_log_store.open()
+
+    with tempfile.TemporaryDirectory(prefix="lognroll-token-store-") as token_directory:
+        tokenized_log_store = TokenizedLogFileStore.write(all_tlogs, token_directory)
+        # Free the parent's full token table after every tokenized log has been written to the temporary file.
+        all_tlogs.clear()
+        gc.collect()
+
+        root_node = tree.find_node("top")
+        root_branch_state = BranchState()
+        root_branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
+        root_branch_state.seqnum = seqnum
+        root_branch_state.random_state = random.getstate()
+        _reset_discovery_timers()
+        runtime_checkpt = time.time()
+        candidate_set = _run_branch_until_split_or_leaf(root_node, root_branch_state, log_dataset, tokenized_log_store)
+        timer_totals = list(_discovery_timer_snapshot())
+        leaves = []
+        failures = []
+        global_patterns = copy.deepcopy(root_branch_state.discovered_patterns)
+        if candidate_set is None:
+            leaves.append({"branch_path":root_branch_state.branch_path,"node":root_node})
+        else:
+            # Close the parent's file handle so every worker opens its own handle and keeps its own read position.
+            tokenized_log_store.close()
+
+            event_queue = queue.Queue()
+            # Keep branch tasks in the parent until a Pool worker is available instead of filling Pool's internal queue.
+            pending_branches = deque((root_node, root_branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(candidate_set))
+            pool = context.Pool(worker_count, initialize_worker, (log_dataset, tokenized_log_store))
+            pending_count = 0
+
+            # Submit pending branches until every available worker slot is occupied.
+            def submit_available_branches():
+                nonlocal pending_count
+                while pending_count < worker_count and len(pending_branches) > 0:
+                    node, branch_state, candidate, candidate_index = pending_branches.popleft()
+                    branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                    pool.apply_async(_run_parallel_pool_worker_branch, (node, branch_state, candidate, candidate_index), callback=event_queue.put, error_callback=lambda error:event_queue.put(BranchResult("failure", failure_traceback=repr(error), timers=(0.0,)*11)))
+                    pending_count += 1
+
+            try:
+                submit_available_branches()
+                while pending_count > 0:
+                    result = event_queue.get()
+                    pending_count -= 1
+                    _add_discovery_timers(timer_totals, result.timers)
+                    if result.branch_status == "leaf":
+                        _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                        leaves.append({"branch_path":result.branch_state.branch_path,"node":result.node})
+                    elif result.branch_status == "split":
+                        _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                        result.branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                        pending_branches.extend((result.node, result.branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(result.candidate_set))
+                    else:
+                        failures.append(result)
+                        break
+                    submit_available_branches()
+            finally:
+                if len(failures) > 0:
+                    pool.terminate()
+                else:
+                    pool.close()
+                pool.join()
+        tokenized_log_store.close()
+    if len(failures) > 0:
+        failure = failures[0]
+        failure_path = "unknown" if failure.branch_state is None else failure.branch_state.branch_path
+        raise RuntimeError("Parallel branch failed at "+str(failure_path)+"\n"+failure.failure_traceback)
+    discovered_patterns[:] = copy.deepcopy(global_patterns)
+    print("Final custom pattern count:", len(discovered_patterns))
+    _rebuild_tree_from_leaves(tree, log_dataset.log_count, leaves)
+    global tm001, tm002, tm003, tm004, tm005, tm006, tm007, tm008, tm009, tm010, tm011
+    tm001, tm002, tm003, tm004, tm005, tm006, tm007, tm008, tm009, tm010, tm011 = timer_totals
+    return time.time()-runtime_checkpt
+
+
+# Thread-pool branch backend (--parallel-backend thread). Threads share the parent's
+# memory directly, so unlike the process backend above there is no pickling boundary:
+# all_tlogs never needs to be file-backed (branch tasks just index the in-memory list),
+# but every task also needs its own private deep copy of `node`/`branch_state` before
+# it starts running, since the process backend got that isolation for free from pickling
+# at submission time and threads do not.
+def _read_tokenized_log_sample_from_memory(all_tlogs, sample_indices):
+    return [all_tlogs[log_index] for log_index in sample_indices]
+
+
+def sample_by_token_length_and_space_count_thread(log_dataset, branch_state, node, all_tlogs):
+    most_popular = max(node.score_counts, key=node.score_counts.get)
+    sample_indices = []
+    for log_index in log_dataset.log_score_indices[most_popular]:
+        if node.all_vect[log_index] == -1 and log_dataset.log_scores[log_index] == most_popular:
+            sample_indices.append(log_index)
+            if len(sample_indices) >= 1000:
+                break
+    sampled_logs = [log_dataset.logs[log_index] for log_index in sample_indices]
+    tokenized_logs = _read_tokenized_log_sample_from_memory(all_tlogs, sample_indices)
+    return sampled_logs, tokenized_logs
+
+
+def _activate_thread_local_branch_state(branch_state):
+    _thread_local_discovery.active = True
+    _thread_local_discovery.discovered_patterns = branch_state.discovered_patterns
+    _thread_local_discovery.seqnum = branch_state.seqnum
+    rng = random.Random()
+    rng.setstate(branch_state.random_state)
+    _thread_local_discovery.rng = rng
+
+
+def _capture_thread_local_branch_state(branch_state):
+    branch_state.discovered_patterns = _thread_local_discovery.discovered_patterns
+    branch_state.seqnum = _thread_local_discovery.seqnum
+    branch_state.random_state = _thread_local_discovery.rng.getstate()
+    _thread_local_discovery.active = False
+
+
+def _run_branch_until_split_or_leaf_thread(node, branch_state, log_dataset, all_tlogs):
+    _activate_thread_local_branch_state(branch_state)
+    while -1 in node.all_vect:
+        sampled_logs, tokenized_logs = sample_by_token_length_and_space_count_thread(log_dataset, branch_state, node, all_tlogs)
+        if len(sampled_logs) == 0:
+            break
+        replace_known_patterns(tokenized_logs)
+        apply_new_patterns_multiprocessing(tokenized_logs)
+        candidate_set = construct_candidate_log_templates(tokenized_logs, node.rep_logs)
+        if len(candidate_set) == 0:
+            raise RuntimeError("No candidate generated for branch "+str(branch_state.branch_path))
+        if len(candidate_set) > 1:
+            _capture_thread_local_branch_state(branch_state)
+            return candidate_set
+        _apply_linear_candidate(node, branch_state, candidate_set[0], log_dataset)
+    _capture_thread_local_branch_state(branch_state)
+    if not node.is_leaf_node() or -1 in node.all_vect:
+        raise RuntimeError("Branch stopped before covering all logs: "+str(branch_state.branch_path))
+    return None
+
+
+def _run_parallel_thread_worker_branch(log_dataset, all_tlogs, node, branch_state, candidate, candidate_index):
+    try:
+        branch_state.branch_path = branch_state.branch_path+(candidate_index,)
+        _activate_thread_local_branch_state(branch_state)
+        _apply_candidate_to_branch(node, branch_state, candidate, log_dataset)
+        _capture_thread_local_branch_state(branch_state)
+        candidate_set = _run_branch_until_split_or_leaf_thread(node, branch_state, log_dataset, all_tlogs)
+        if candidate_set is None:
+            return BranchResult("leaf", node=node, branch_state=branch_state, timers=(0.0,)*11)
+        return BranchResult("split", node=node, branch_state=branch_state, candidate_set=candidate_set, timers=(0.0,)*11)
+    except BaseException:
+        return BranchResult("failure", branch_state=branch_state, failure_traceback=traceback.format_exc(), timers=(0.0,)*11)
+
+
+def _run_parallel_tree_discovery_thread(tree, log_dataset, all_tlogs, worker_count):
+    root_node = tree.find_node("top")
+    root_branch_state = BranchState()
+    root_branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
+    root_branch_state.seqnum = seqnum
+    root_branch_state.random_state = random.getstate()
+    runtime_checkpt = time.time()
+    candidate_set = _run_branch_until_split_or_leaf_thread(root_node, root_branch_state, log_dataset, all_tlogs)
+    leaves = []
+    failures = []
+    global_patterns = copy.deepcopy(root_branch_state.discovered_patterns)
+    if candidate_set is None:
+        leaves.append({"branch_path":root_branch_state.branch_path,"node":root_node})
+    else:
+        event_queue = queue.Queue()
+        pending_branches = deque((root_node, root_branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(candidate_set))
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+        pending_count = 0
+
+        # Threads share memory with the parent, so (unlike Pool.apply_async, which
+        # implicitly deep-copies via pickling) node/branch_state must be explicitly
+        # deep-copied per task here -- otherwise sibling branch tasks spawned from the
+        # same split would mutate the same node/branch_state object concurrently.
+        def submit_available_branches():
+            nonlocal pending_count
+            while pending_count < worker_count and len(pending_branches) > 0:
+                node, branch_state, candidate, candidate_index = pending_branches.popleft()
+                task_node = copy.deepcopy(node)
+                task_branch_state = copy.deepcopy(branch_state)
+                task_branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                future = executor.submit(_run_parallel_thread_worker_branch, log_dataset, all_tlogs, task_node, task_branch_state, candidate, candidate_index)
+                def on_done(future):
+                    error = future.exception()
+                    if error is None:
+                        event_queue.put(future.result())
+                    else:
+                        event_queue.put(BranchResult("failure", failure_traceback=repr(error), timers=(0.0,)*11))
+                future.add_done_callback(on_done)
+                pending_count += 1
+
+        try:
+            submit_available_branches()
+            while pending_count > 0:
+                result = event_queue.get()
+                pending_count -= 1
+                if result.branch_status == "leaf":
+                    _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                    leaves.append({"branch_path":result.branch_state.branch_path,"node":result.node})
+                elif result.branch_status == "split":
+                    _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                    result.branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                    pending_branches.extend((result.node, result.branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(result.candidate_set))
+                else:
+                    failures.append(result)
+                    break
+                submit_available_branches()
+        finally:
+            # Python threads cannot be force-killed: on failure this only stops
+            # not-yet-started tasks, already-running branch threads finish in the background.
+            executor.shutdown(wait=True, cancel_futures=len(failures) > 0)
+    if len(failures) > 0:
+        failure = failures[0]
+        failure_path = "unknown" if failure.branch_state is None else failure.branch_state.branch_path
+        raise RuntimeError("Parallel branch failed at "+str(failure_path)+"\n"+failure.failure_traceback)
+    discovered_patterns[:] = copy.deepcopy(global_patterns)
+    print("Final custom pattern count:", len(discovered_patterns))
+    print("Note: thread backend does not track per-phase timing breakdown; only wall-clock total is meaningful.")
+    _rebuild_tree_from_leaves(tree, log_dataset.log_count, leaves)
+    return time.time()-runtime_checkpt
+
+
+if __name__ == '__main__':
+    debug_mode = False
+    openfile_list = []
+    try:
+        parser = argparse.ArgumentParser(description="")
+        parser.add_argument('--logfile',  type=argparse.FileType('r'), nargs='+', required=True, help='List of one or more input log files')
+        parser.add_argument('--debug',  action='store_true', required=False, help='When specified, it walks through each log processing and print out messages.')
+        parser.add_argument('--linear',  action='store_true', required=False, help='Whether to follow linear execution path along the tree or not.')
+        parser.add_argument('--workers', type=int, default=1, help='Maximum concurrent candidate branches (default: 1).')
+        parser.add_argument('--parallel-backend', choices=['process', 'thread'], default='process', help='Execution backend for --workers > 1 (default: process).')
+        parser.add_argument('--seed', type=int, required=False, help='Seed Python and NumPy random generators for reproducible discovery.')
+        # Now, we don't need clean mode
+        parser.add_argument('--clean',  action='store_true', required=False, help='When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.')
+
+        args = parser.parse_args()
+        args.clean = True
+        if args.workers < 1:
+            parser.error('--workers must be at least 1')
+        if args.debug and args.workers > 1:
+            parser.error('--debug cannot be used with --workers > 1')
+        if args.seed is not None:
+            random.seed(args.seed)
+            numpy.random.seed(args.seed)
+            print('Random seed:',args.seed)
+        openfile_list = args.logfile
+        if len(openfile_list)>1:
+            print("Specify only one log file. Currently",len(openfile_list),"are given.")
+            sys.exit(0)
+
+        if args.debug==False:
+            debug_mode = False
+        else:
+            debug_mode = bool(args.debug)
+
+        if args.linear==False:
+            linear_mode = False
+        else:
+            linear_mode = bool(args.linear)
+
+        if os.path.exists(reuse_logfilename):
+            prev_reuse_logfilename = pickle.load(open(reuse_logfilename,"r"))
+        else:
+            prev_reuse_logfilename = "-"
+
+        print("** Previous log file:",prev_reuse_logfilename)
+        print("**    Input log file:",openfile_list[0].name)
+
+        clean_mode = False
+        if args.clean==False:
+            if prev_reuse_logfilename==openfile_list[0].name:
+               clean_mode = False
+               print("\033[2;102mNon-Clean (cache reuse, fast) mode\033[0m")
+            else:
+                print("\033[31;91mAlthough you wanted FAST REUSE mode, the input log file is different from the previous run. Forcing clean mode ... \033[0m")
+                print("\033[37;101mClean (slow) mode\033[0m")
+                clean_mode = True
+                os.remove(reuse_logfilename)
+                pickle.dump(openfile_list[0].name, open(reuse_logfilename,"w"))
+        else:
+            print("\033[37;101mClean (slow) mode\033[0m")
+            clean_mode = bool(args.clean)
+
+    except Exception as e:
+        print(('Error: %s' % str(e)))
+
+    print("Loading all logs into memory.")
+    raw_logs = read_log_files( openfile_list, None )
+
+    old_log_count = len(raw_logs)
+    rep_logs = remove_log_template_matches(raw_logs, prepopulated_log_templates)
+    raw_log_count = len(raw_logs)
+    print("==================================================================================================================================")
+    print("Old Log count:",old_log_count)
+    print("New Log count:",len(raw_logs))
+    print("Prepopulated log template count:", len(prepopulated_log_templates))
+    print("Representative logs count:", len(rep_logs))
+    log_templates = copy.deepcopy(prepopulated_log_templates)
+
+    print("Preprocessing logs...")
+    all_logs = preprocess_known_patterns(raw_logs)
+    raw_logs = None
+
+    if clean_mode:
+        if os.path.exists(reuse_filename):
+            os.remove(reuse_filename)
+
+    if os.path.exists(reuse_filename):
+        print("Reusing reuse file ...")
+        all_tlogs = pickle.load(open(reuse_filename,"rb"))
+    else:
+        print("Sequence number:", seqnum)
+        print("Tokenizing all logs.")
+        all_tlogs = do_tokenization(all_logs)
+        print("Done tokenizing.", len(all_logs))
+
+        #apply_all_patterns(all_tlogs)
+        print("Rearranging numbers of known patterns to make values unique ...")
+        uniquify_numbers(all_tlogs)
+        print("Done rearranging values.")
+        print("len(all_tlogs):",len(all_tlogs))
+
+        pickle.dump(all_tlogs, open(reuse_filename,"wb"))
+
+    # Maps each log index to its immutable score.
+    # Example: all_log_scores[7] == 3004; mark_matched_logs() decrements score_counts[3004].
+    all_log_scores = build_log_scores(all_logs)
+    # Maps each score to its original log indices.
+    # Example: all_log_score_indices[3004] == [1, 7]; sampling uses it for most_popular.
+    all_log_score_indices = build_log_score_index(all_log_scores)
+    log_dataset = LogDataset(raw_log_count, all_logs, all_log_scores, all_log_score_indices)
+
+    tree = Tree()
+    root_node = tree.create_node("TOP", log_dataset.log_count, "top")
+    root_node.score_counts = dict(Counter(all_log_scores))
+
+    discovery_elapsed = run_tree_discovery(tree, log_dataset, all_tlogs,  linear_mode, args.workers, args.parallel_backend)
+    parallel_mode = args.workers > 1 and not linear_mode
+    if parallel_mode:
+        print("Timing mode: aggregate worker work; wall-clock runtime is reported below.")
     print("{0:8.3f}".format(tm001), "Apply all patterns")
     print("{0:8.3f}".format(tm002), "Apply new patterns")
     print("{0:8.3f}".format(tm003), "Random sampling logs")
@@ -2924,14 +3509,17 @@ if __name__ == '__main__':
     print("{0:8.3f}".format(tm004), "Tokenizing logs")
     print("{0:8.3f}".format(tm005), "Filtering all columns")
     print("{0:8.3f}".format(tm011), "Match and remove logs")
-    print("{0:8.3f}".format(discovery_elapsed-tm001-tm002-tm003-tm004-tm005-tm006-tm007-tm008-tm009-tm010-tm011), "Unaccounted")
+    if parallel_mode:
+        print("     n/a", "Unaccounted (parallel overlap)")
+    else:
+        print("{0:8.3f}".format(discovery_elapsed-tm001-tm002-tm003-tm004-tm005-tm006-tm007-tm008-tm009-tm010-tm011), "Unaccounted")
     print("{0:8.3f}".format(discovery_elapsed), "\033[0;103mTemplate discovery runtime\033[0m")
 
     print("\033[1;34m",tree.show("top"),"...\033[0m")
     print(" ")
 
     scoring_checkpt = time.time()
-    best_result = _select_best_leaf(tree)
+    best_result = _select_best_leaf(tree,log_dataset.logs)
     scoring_elapsed = time.time() - scoring_checkpt
     if best_result is None:
         print("ERROR: No completed leaf has an effective template set.", file=sys.stderr)
@@ -2940,11 +3528,11 @@ if __name__ == '__main__':
     print("{0:8.3f}".format(scoring_elapsed), "\033[0;103mLeaf scoring runtime\033[0m")
     print("{0:8.3f}".format(discovery_elapsed+scoring_elapsed), "\033[0;103mDiscovery plus scoring runtime\033[0m")
 
-    best_node = best_result["node"]
+    best_node = best_result.node
     print("Best leaf:", best_node.name, "["+best_node.identifier+"]")
-    print("Best leaf SL:", best_result["SL"])
-    print("Best leaf CPL:", best_result["CPL"])
-    print("Best leaf score:", best_result["score"])
-    print("Final template count:", len(best_result["selected"]))
-    for t in sorted(best_result["selected"], key=lambda k: k["count"], reverse=True):
+    print("Best leaf SL:", best_result.sl)
+    print("Best leaf CPL:", best_result.cpl)
+    print("Best leaf score:", best_result.score)
+    print("Final template count:", len(best_result.selected))
+    for t in sorted(best_result.selected, key=lambda k: k["count"], reverse=True):
         print(t["count"],t["template"])
