@@ -2026,8 +2026,11 @@ def generate_log_template_star(fwords,realcall):
     log_template = regex.sub("{}","{.*}",log_template)
 
     final_template = []
+    # A token whose wildcard is fenced by a literal key or bracket keeps that boundary.
+    # e.g. "key=.*", "ns:.*", ".*\(", "\).*" stay as they are instead of collapsing to ".*".
+    COLLAPSE_GUARDS = ("=.*", ":.*",".*\\[", ".*\\]", ".*\\(", ".*\\)","\\[.*", "\\].*", "\\(.*", "\\).*")
     for t in log_template.split():
-        if ".*" in t and "=.*" not in t and ":.*" not in t and regex.match("^\.+\*(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)$", t)==None:
+        if ".*" in t and not any(guard in t for guard in COLLAPSE_GUARDS) and regex.match("^\.+\*(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)$", t)==None:
             final_template.append(".*")
         else:
             final_template.append(t)
