@@ -826,6 +826,10 @@ common_patterns = [
         "serial": "1",
         "prefix":"file_path" },
 
+    {   "pattern": "[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}", # UUID, possibly carrying a literal prefix such as DS- or BP-
+        "serial": "1",
+        "prefix":"uuid" },
+
     {   "pattern": "\d+\.\d+\.\d+\.\d+(:\d+)?", # IP address and port number
         "serial": "1",
         "prefix":"ipaddr_port" },
