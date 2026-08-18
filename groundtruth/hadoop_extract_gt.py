@@ -47,7 +47,7 @@ prepopulated_log_templates = [
 "INFO org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.ParentQueue: assignedContainer queue=.* usedCapacity=.* absoluteUsedCapacity=.* used=<memory:.*, vCores:.*> cluster=<memory:.*, vCores:.*>",
 "INFO org.apache.hadoop.yarn.server.nodemanager.NMAuditLogger: USER=.* OPERATION=.* TARGET=.* RESULT=.* APPID=.* CONTAINERID=.*",
 "INFO org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.LocalizedResource: Resource .* transitioned from .* to .*",
-"INFO org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ResourceLocalizationService: Writing credentials to the nmPrivate file .* Credentials list.*",
+"INFO org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ResourceLocalizationService: Writing credentials to the nmPrivate file .* Credentials list:",
 "INFO org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationImpl: Application .* transitioned from .* to .*",
 "WARN org.apache.hadoop.yarn.server.nodemanager.DefaultContainerExecutor: Exit code from container .* is : .*",
 "INFO org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueue: default used=<memory:.*, vCores:.*> numContainers=.* user=.* user\-resources=<memory:.*, vCores:.*>",
