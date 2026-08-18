@@ -524,7 +524,8 @@ def is_hexa(s):
 
 def are_all_hexa(numlist):
     for n in numlist:
-        if not(is_hexa(n)):
+        # A digit-free hex run ("c", "be", "added") is a word, not a value.
+        if not(is_hexa(n) and any(c.isdigit() for c in n)):
             return False
     return True
 
@@ -2248,6 +2249,9 @@ def construct_candidate_log_templates(input_logs, rep_logs):
                 for p in number_patterns: 
                     matched = p["matcher"].match(runlength_token)
                     if matched!=None:
+                        # A digit-free hex run ("c", "be", "added") is a word, not a value.
+                        if p["type"]=="hexa2" and not any(c.isdigit() for c in runlength_token):
+                            continue
                         found = True
                 if found:
                     #print runlength_token, "WILDCARD"
