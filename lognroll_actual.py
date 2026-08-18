@@ -702,9 +702,6 @@ standalone_patterns = [
 #        "label": "~107~",
 #        "matcher": None },
 
-    {   "pattern":"[\da-zA-Z]{8}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{12}", # UUID format
-        "label": "~108~",
-        "matcher": None },
 #    {'pattern': 'container_\\d{13}_\\d{4}_\\d{2}_\\d{6}', 'label': '~109~', 'matcher': None},
 #    {'pattern': 'blk_\\d{10}_\\d{4}', 'label': '~110~', 'matcher': None},
 #    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~111~', 'matcher': None},
