@@ -832,11 +832,11 @@ common_patterns = [
         "serial": "1",
         "prefix":"ipaddr_port" },
 
-    {   "pattern":"\-?\d+\.\d+ (KB|GB|MB)", # 21.5 MB
+    {   "pattern":"\-?\d+\.\d+ (KB|GB|MB|G)(?![A-Za-z])", # 21.5 MB, 7.8 G
         "serial": "1",
         "prefix":"data_size_float" },
 
-    {   "pattern":"\-?\d+ (KB|GB|MB)", # 5 GB
+    {   "pattern":"\-?\d+ (KB|GB|MB|G)(?![A-Za-z])", # 5 GB, 8 G
         "serial": "1",
         "prefix":"data_size_int" },
 ]
