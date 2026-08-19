@@ -1964,6 +1964,12 @@ def generate_log_template_star(fwords,realcall):
                         #{ "pattern": "[\da-fA-F]+", "type":"hexa2"}
                     ]
  
+    # A '.*' here is regex form a caller handed back; reject it instead of mangling it.
+    # "capacity=.*" -> sub('\*','.*') -> "capacity=..*" -> guard misses "=.*" -> ".*"
+    for w in fwords:
+        if ".*" in w:
+            raise AssertionError("generate_log_template_star: output-form wildcard "+repr(w)+" in fwords "+repr(fwords))
+
     # Transform the discovered log template into a python-ready form
     log_template = "".join(fwords).strip()
 
@@ -2649,19 +2655,24 @@ def _select_best_leaf(tree, logs):
     return best_result
 
 
-template_token_cache = {}
+template_fwords_cache = {}
 
 
-def tokenize_log_template(s):
-    if s in template_token_cache:
-        return list(template_token_cache[s])
+# Inverse of generate_log_template_star(), used by the merge: regex form back to fwords.
+# "BLOCK\* x=.*" -> ['BLOCK~200~', ' ', 'x', '=', '*']
+def tokenize_template_to_fwords(s):
+    if s in template_fwords_cache:
+        return list(template_fwords_cache[s])
 
-    tok = custom_split(regex.sub("\\\\","",s))
+    # "\*" first, or the bare '*' left by the backslash strip would read as a wildcard.
+    tok = custom_split(regex.sub("\\\\","",s.replace("\\*","~200~")))
     for y in range(0,len(tok)):
-        if '~' in tok[y]:
-            tok[y]=".*"
-    template_token_cache[s] = tok
-    return list(template_token_cache[s])
+        if '~' in tok[y].replace('~200~',''):
+            tok[y]="*"
+        elif ".*" in tok[y]:
+            tok[y]=tok[y].replace(".*","*")
+    template_fwords_cache[s] = tok
+    return list(template_fwords_cache[s])
 
 
 
@@ -2868,13 +2879,13 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
 
             log_template = candidate_set[0]
 
-            tok_candi = tokenize_log_template(log_template) # tok_candi: tokenized candidate
+            tok_candi = tokenize_template_to_fwords(log_template) # tok_candi: tokenized candidate
             merged_template_indices = []
             printed = False
             for i in range(0,len(cur_node.log_templates)):
                 if cur_node.log_templates[i]==None:
                     continue
-                tok_logtm = tokenize_log_template(cur_node.log_templates[i]["template"]) # tok_lt: tokenized log template
+                tok_logtm = tokenize_template_to_fwords(cur_node.log_templates[i]["template"]) # tok_lt: tokenized log template
 
                 # Compare token by token to see if they have only 1 difference
                 if len(tok_candi)==len(tok_logtm):
@@ -2894,9 +2905,9 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
 
                         print("   Token to update:", tok_candi[diff_loc])
                         print("   Token to update:", tok_logtm[diff_loc])
-                        tok_logtm[diff_loc]=".*"
+                        tok_logtm[diff_loc]="*"
                         log_template = generate_log_template_star(tok_logtm,True)
-                        tok_candi = tokenize_log_template(log_template)
+                        tok_candi = tokenize_template_to_fwords(log_template)
                         print("   New log_template:", log_template)
                         merged_template_indices.append(i)
                         cur_node.log_templates[i]=None
@@ -3056,20 +3067,20 @@ def _apply_candidate_to_branch(node, branch_state, log_template, log_dataset):
 
 
 def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
-    tok_candi = tokenize_log_template(log_template)
+    tok_candi = tokenize_template_to_fwords(log_template)
     merged_template_indices = []
     for index, old_template in enumerate(node.log_templates):
         if old_template is None:
             continue
-        tok_logtm = tokenize_log_template(old_template["template"])
+        tok_logtm = tokenize_template_to_fwords(old_template["template"])
         if len(tok_candi) != len(tok_logtm):
             continue
         diff_locations = [position for position in range(len(tok_candi)) if tok_candi[position] != tok_logtm[position]]
         if len(diff_locations) != 1:
             continue
-        tok_logtm[diff_locations[0]] = ".*"
+        tok_logtm[diff_locations[0]] = "*"
         log_template = generate_log_template_star(tok_logtm,True)
-        tok_candi = tokenize_log_template(log_template)
+        tok_candi = tokenize_template_to_fwords(log_template)
         merged_template_indices.append(index)
         node.log_templates[index] = None
         node.rep_logs[index] = None
