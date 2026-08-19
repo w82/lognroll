@@ -841,6 +841,34 @@ common_patterns = [
         "prefix":"data_size_int" },
 ]
 
+KEYVAL_BRACKETS = {"[": "]", "{": "}", "(": ")"}
+
+def mask_bracketed_key_values(log):
+    global seqnum
+    pos = 0
+    while pos<len(log):
+        bracket_open = log[pos]
+        if bracket_open not in KEYVAL_BRACKETS or pos<2 or log[pos-1]!="=" or log[pos-2].isspace() or log[pos-2] in "~=":
+            pos += 1
+            continue
+        bracket_close = KEYVAL_BRACKETS[bracket_open]
+        depth = 1
+        end = pos+1
+        while end<len(log) and depth>0:
+            if log[end]==bracket_open:
+                depth += 1
+            elif log[end]==bracket_close:
+                depth -= 1
+            end += 1
+        if depth>0:
+            pos += 1
+            continue
+        label_str = "~KV"+format(seqnum,'09d')+"~"
+        seqnum = (seqnum+1) % MOD_FACTOR
+        log = log[0:pos]+label_str+log[end:]
+        pos += len(label_str)
+    return log
+
 def preprocess_known_patterns(logs):
     processed = []
     for i in range(0,len(logs)):
@@ -858,6 +886,9 @@ def preprocess_known_patterns(logs):
                     log = log[0:m.start()-diff]+label_str+log[(m.end())-diff:]
                     diff = diff + ((m.end())-(m.start())) - len(label_str)
                     found = True
+        # Find key-value structures whose values are enclosed in brackets.
+        # Example: replicas=[ReplicaUC[...]] -> replicas=~KV000000001~
+        log = mask_bracketed_key_values(log)
         processed.append(log)
     return processed
 
@@ -1934,6 +1965,33 @@ def Generate_log_template(fwords):
     return log_template
 
 
+# Static separators fence wildcard-bearing segments.
+COLLAPSE_FENCES = ("\\[", "\\]", "\\(", "\\)", "\\{", "\\}", "=", ":", ",", ";", "<", ">")
+
+def collapse_fenced_wildcards(token):
+    # Widen only wildcard-bearing segments while preserving their fences.
+    # Example: "blk_.*_1582," -> ".*,", while "capacity=.*" and "(.*)" stay unchanged.
+    collapsed = []
+    segment = ""
+    position = 0
+    while position < len(token):
+        fence = None
+        for candidate in COLLAPSE_FENCES:
+            if token.startswith(candidate, position):
+                fence = candidate
+                break
+        if fence is None:
+            segment += token[position]
+            position += 1
+            continue
+        collapsed.append(".*" if ".*" in segment else segment)
+        collapsed.append(fence)
+        segment = ""
+        position += len(fence)
+    collapsed.append(".*" if ".*" in segment else segment)
+    return "".join(collapsed)
+
+
 # realcall: True if the call is for the final log_template generation, not just for testing the current log_template
 def generate_log_template_star(fwords,realcall):
 
@@ -2033,16 +2091,9 @@ def generate_log_template_star(fwords,realcall):
     log_template = regex.sub("\\\\\[\\\\\]","\\[.*\\]",log_template)
     log_template = regex.sub("{}","{.*}",log_template)
 
-    final_template = []
-    # A token whose wildcard is fenced by a literal key or bracket keeps that boundary.
-    # e.g. "key=.*", "ns:.*", ".*\(", "\).*" stay as they are instead of collapsing to ".*".
-    COLLAPSE_GUARDS = ("=.*", ":.*",".*\\[", ".*\\]", ".*\\(", ".*\\)","\\[.*", "\\].*", "\\(.*", "\\).*")
-    for t in log_template.split():
-        if ".*" in t and not any(guard in t for guard in COLLAPSE_GUARDS) and regex.match("^\.+\*(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)$", t)==None:
-            final_template.append(".*")
-        else:
-            final_template.append(t)
-    log_template = " ".join(final_template)
+    # Each token widens only around its wildcards; the fences and the literal
+    # segments between them stay put.
+    log_template = " ".join(collapse_fenced_wildcards(t) for t in log_template.split())
 
     found = True
     while found:
