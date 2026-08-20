@@ -2086,7 +2086,9 @@ def generate_log_template_star(fwords,realcall):
     #    log_template = re.sub(common_patterns[n]["label"], ".*", log_template)
     #log_template = re.sub("~300~",".*",log_template)
 
-    log_template = regex.sub("~\\S+~",".*",log_template)
+    # Replace each marker separately to preserve static text between markers.
+    # Example: ~A~key=~B~ keeps key=.
+    log_template = regex.sub(r"~[^~\s]+~",".*",log_template)
 
     for p in common_patterns:
         marker = p["prefix"]+"_"+"\\d{9}"
