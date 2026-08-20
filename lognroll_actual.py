@@ -784,6 +784,10 @@ common_patterns = [
 #    {   "pattern":"Wasn't",
 #        "label": "~214~" },
 
+    {   "pattern": r"hdfs://[^\s()]+\(->/[^\s()]+\)",
+        "serial": "1",
+        "prefix":"hdfs_url" },
+
     {   "pattern": "hdfs://([a-zA-Z0-9_\-\.\*:\+]+/)+([a-zA-Z0-9_\-\.\*:\+]*(\?[a-zA-Z0-9_\-:\+]+=[a-zA-Z0-9_\-:\+]+(&[a-zA-Z0-9_\-:\+]+=[a-zA-Z0-9_\-:\+]+)*)?)",
         "serial": "1",
         "prefix":"hdfs_url" },
