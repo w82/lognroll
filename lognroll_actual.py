@@ -524,7 +524,8 @@ def is_hexa(s):
 
 def are_all_hexa(numlist):
     for n in numlist:
-        if not(is_hexa(n)):
+        # A digit-free hex run ("c", "be", "added") is a word, not a value.
+        if not(is_hexa(n) and any(c.isdigit() for c in n)):
             return False
     return True
 
@@ -702,9 +703,6 @@ standalone_patterns = [
 #        "label": "~107~",
 #        "matcher": None },
 
-    {   "pattern":"[\da-zA-Z]{8}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{4}\-[\da-zA-Z]{12}", # UUID format
-        "label": "~108~",
-        "matcher": None },
 #    {'pattern': 'container_\\d{13}_\\d{4}_\\d{2}_\\d{6}', 'label': '~109~', 'matcher': None},
 #    {'pattern': 'blk_\\d{10}_\\d{4}', 'label': '~110~', 'matcher': None},
 #    {'pattern': 'application_\\d{13}_\\d{4}', 'label': '~111~', 'matcher': None},
@@ -786,6 +784,10 @@ common_patterns = [
 #    {   "pattern":"Wasn't",
 #        "label": "~214~" },
 
+    {   "pattern": r"hdfs://[^\s()]+\(->/[^\s()]+\)",
+        "serial": "1",
+        "prefix":"hdfs_url" },
+
     {   "pattern": "hdfs://([a-zA-Z0-9_\-\.\*:\+]+/)+([a-zA-Z0-9_\-\.\*:\+]*(\?[a-zA-Z0-9_\-:\+]+=[a-zA-Z0-9_\-:\+]+(&[a-zA-Z0-9_\-:\+]+=[a-zA-Z0-9_\-:\+]+)*)?)",
         "serial": "1",
         "prefix":"hdfs_url" },
@@ -826,18 +828,50 @@ common_patterns = [
         "serial": "1",
         "prefix":"file_path" },
 
+    {   "pattern": "[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}", # UUID, possibly carrying a literal prefix such as DS- or BP-
+        "serial": "1",
+        "prefix":"uuid" },
+
     {   "pattern": "\d+\.\d+\.\d+\.\d+(:\d+)?", # IP address and port number
         "serial": "1",
         "prefix":"ipaddr_port" },
 
-    {   "pattern":"\-?\d+\.\d+ (KB|GB|MB)", # 21.5 MB
+    {   "pattern":"\-?\d+\.\d+ (KB|GB|MB|G)(?![A-Za-z])", # 21.5 MB, 7.8 G
         "serial": "1",
         "prefix":"data_size_float" },
 
-    {   "pattern":"\-?\d+ (KB|GB|MB)", # 5 GB
+    {   "pattern":"\-?\d+ (KB|GB|MB|G)(?![A-Za-z])", # 5 GB, 8 G
         "serial": "1",
         "prefix":"data_size_int" },
 ]
+
+KEYVAL_BRACKETS = {"[": "]", "{": "}", "(": ")"}
+
+def mask_bracketed_key_values(log):
+    global seqnum
+    pos = 0
+    while pos<len(log):
+        bracket_open = log[pos]
+        if bracket_open not in KEYVAL_BRACKETS or pos<2 or log[pos-1]!="=" or log[pos-2].isspace() or log[pos-2] in "~=":
+            pos += 1
+            continue
+        bracket_close = KEYVAL_BRACKETS[bracket_open]
+        depth = 1
+        end = pos+1
+        while end<len(log) and depth>0:
+            if log[end]==bracket_open:
+                depth += 1
+            elif log[end]==bracket_close:
+                depth -= 1
+            end += 1
+        if depth>0:
+            pos += 1
+            continue
+        label_str = "~KV"+format(seqnum,'09d')+"~"
+        seqnum = (seqnum+1) % MOD_FACTOR
+        log = log[0:pos]+label_str+log[end:]
+        pos += len(label_str)
+    return log
 
 def preprocess_known_patterns(logs):
     processed = []
@@ -856,6 +890,9 @@ def preprocess_known_patterns(logs):
                     log = log[0:m.start()-diff]+label_str+log[(m.end())-diff:]
                     diff = diff + ((m.end())-(m.start())) - len(label_str)
                     found = True
+        # Find key-value structures whose values are enclosed in brackets.
+        # Example: replicas=[ReplicaUC[...]] -> replicas=~KV000000001~
+        log = mask_bracketed_key_values(log)
         processed.append(log)
     return processed
 
@@ -1932,6 +1969,33 @@ def Generate_log_template(fwords):
     return log_template
 
 
+# Static separators fence wildcard-bearing segments.
+COLLAPSE_FENCES = ("\\[", "\\]", "\\(", "\\)", "\\{", "\\}", "=", ":", ",", ";", "<", ">")
+
+def collapse_fenced_wildcards(token):
+    # Widen only wildcard-bearing segments while preserving their fences.
+    # Example: "blk_.*_1582," -> ".*,", while "capacity=.*" and "(.*)" stay unchanged.
+    collapsed = []
+    segment = ""
+    position = 0
+    while position < len(token):
+        fence = None
+        for candidate in COLLAPSE_FENCES:
+            if token.startswith(candidate, position):
+                fence = candidate
+                break
+        if fence is None:
+            segment += token[position]
+            position += 1
+            continue
+        collapsed.append(".*" if ".*" in segment else segment)
+        collapsed.append(fence)
+        segment = ""
+        position += len(fence)
+    collapsed.append(".*" if ".*" in segment else segment)
+    return "".join(collapsed)
+
+
 # realcall: True if the call is for the final log_template generation, not just for testing the current log_template
 def generate_log_template_star(fwords,realcall):
 
@@ -1962,6 +2026,12 @@ def generate_log_template_star(fwords,realcall):
                         #{ "pattern": "[\da-fA-F]+", "type":"hexa2"}
                     ]
  
+    # A '.*' here is regex form a caller handed back; reject it instead of mangling it.
+    # "capacity=.*" -> sub('\*','.*') -> "capacity=..*" -> guard misses "=.*" -> ".*"
+    for w in fwords:
+        if ".*" in w:
+            raise AssertionError("generate_log_template_star: output-form wildcard "+repr(w)+" in fwords "+repr(fwords))
+
     # Transform the discovered log template into a python-ready form
     log_template = "".join(fwords).strip()
 
@@ -2016,7 +2086,9 @@ def generate_log_template_star(fwords,realcall):
     #    log_template = re.sub(common_patterns[n]["label"], ".*", log_template)
     #log_template = re.sub("~300~",".*",log_template)
 
-    log_template = regex.sub("~\\S+~",".*",log_template)
+    # Replace each marker separately to preserve static text between markers.
+    # Example: ~A~key=~B~ keeps key=.
+    log_template = regex.sub(r"~[^~\s]+~",".*",log_template)
 
     for p in common_patterns:
         marker = p["prefix"]+"_"+"\\d{9}"
@@ -2025,13 +2097,9 @@ def generate_log_template_star(fwords,realcall):
     log_template = regex.sub("\\\\\[\\\\\]","\\[.*\\]",log_template)
     log_template = regex.sub("{}","{.*}",log_template)
 
-    final_template = []
-    for t in log_template.split():
-        if ".*" in t and "=.*" not in t and ":.*" not in t and regex.match("^\.+\*(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)$", t)==None:
-            final_template.append(".*")
-        else:
-            final_template.append(t)
-    log_template = " ".join(final_template)
+    # Each token widens only around its wildcards; the fences and the literal
+    # segments between them stay put.
+    log_template = " ".join(collapse_fenced_wildcards(t) for t in log_template.split())
 
     found = True
     while found:
@@ -2244,6 +2312,9 @@ def construct_candidate_log_templates(input_logs, rep_logs):
                 for p in number_patterns: 
                     matched = p["matcher"].match(runlength_token)
                     if matched!=None:
+                        # A digit-free hex run ("c", "be", "added") is a word, not a value.
+                        if p["type"]=="hexa2" and not any(c.isdigit() for c in runlength_token):
+                            continue
                         found = True
                 if found:
                     #print runlength_token, "WILDCARD"
@@ -2641,19 +2712,24 @@ def _select_best_leaf(tree, logs):
     return best_result
 
 
-template_token_cache = {}
+template_fwords_cache = {}
 
 
-def tokenize_log_template(s):
-    if s in template_token_cache:
-        return list(template_token_cache[s])
+# Inverse of generate_log_template_star(), used by the merge: regex form back to fwords.
+# "BLOCK\* x=.*" -> ['BLOCK~200~', ' ', 'x', '=', '*']
+def tokenize_template_to_fwords(s):
+    if s in template_fwords_cache:
+        return list(template_fwords_cache[s])
 
-    tok = custom_split(regex.sub("\\\\","",s))
+    # "\*" first, or the bare '*' left by the backslash strip would read as a wildcard.
+    tok = custom_split(regex.sub("\\\\","",s.replace("\\*","~200~")))
     for y in range(0,len(tok)):
-        if '~' in tok[y]:
-            tok[y]=".*"
-    template_token_cache[s] = tok
-    return list(template_token_cache[s])
+        if '~' in tok[y].replace('~200~',''):
+            tok[y]="*"
+        elif ".*" in tok[y]:
+            tok[y]=tok[y].replace(".*","*")
+    template_fwords_cache[s] = tok
+    return list(template_fwords_cache[s])
 
 
 
@@ -2860,13 +2936,13 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
 
             log_template = candidate_set[0]
 
-            tok_candi = tokenize_log_template(log_template) # tok_candi: tokenized candidate
+            tok_candi = tokenize_template_to_fwords(log_template) # tok_candi: tokenized candidate
             merged_template_indices = []
             printed = False
             for i in range(0,len(cur_node.log_templates)):
                 if cur_node.log_templates[i]==None:
                     continue
-                tok_logtm = tokenize_log_template(cur_node.log_templates[i]["template"]) # tok_lt: tokenized log template
+                tok_logtm = tokenize_template_to_fwords(cur_node.log_templates[i]["template"]) # tok_lt: tokenized log template
 
                 # Compare token by token to see if they have only 1 difference
                 if len(tok_candi)==len(tok_logtm):
@@ -2886,9 +2962,9 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
 
                         print("   Token to update:", tok_candi[diff_loc])
                         print("   Token to update:", tok_logtm[diff_loc])
-                        tok_logtm[diff_loc]=".*"
+                        tok_logtm[diff_loc]="*"
                         log_template = generate_log_template_star(tok_logtm,True)
-                        tok_candi = tokenize_log_template(log_template)
+                        tok_candi = tokenize_template_to_fwords(log_template)
                         print("   New log_template:", log_template)
                         merged_template_indices.append(i)
                         cur_node.log_templates[i]=None
@@ -3048,20 +3124,20 @@ def _apply_candidate_to_branch(node, branch_state, log_template, log_dataset):
 
 
 def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
-    tok_candi = tokenize_log_template(log_template)
+    tok_candi = tokenize_template_to_fwords(log_template)
     merged_template_indices = []
     for index, old_template in enumerate(node.log_templates):
         if old_template is None:
             continue
-        tok_logtm = tokenize_log_template(old_template["template"])
+        tok_logtm = tokenize_template_to_fwords(old_template["template"])
         if len(tok_candi) != len(tok_logtm):
             continue
         diff_locations = [position for position in range(len(tok_candi)) if tok_candi[position] != tok_logtm[position]]
         if len(diff_locations) != 1:
             continue
-        tok_logtm[diff_locations[0]] = ".*"
+        tok_logtm[diff_locations[0]] = "*"
         log_template = generate_log_template_star(tok_logtm,True)
-        tok_candi = tokenize_log_template(log_template)
+        tok_candi = tokenize_template_to_fwords(log_template)
         merged_template_indices.append(index)
         node.log_templates[index] = None
         node.rep_logs[index] = None
