@@ -785,6 +785,28 @@ common_patterns = [
 #    {   "pattern":"Wasn't",
 #        "label": "~214~" },
 
+    # Mask timestamps before IP/path patterns and tokenization. Word-based
+    # dates and compound numeric dates are not handled by uniquify_numbers().
+    {   "pattern": r"\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4}\]",
+        "serial": "1",
+        "prefix":"ts_ctime" },  # [Thu Jun 09 06:07:04 2005]  (Apache, ctime)
+    {   "pattern": r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)?(?: \d{4})?",
+        "serial": "1",
+        "prefix":"ts_syslog" },  # Jun  9 06:06:20  (BSD syslog: Linux, Mac)
+
+    {   "pattern": r"(?<!\S)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])-(?:[01]\d|2[0-3])\.[0-5]\d\.[0-5]\d\.\d{6}(?!\S)",
+        "serial": "1",
+        "prefix":"ts_bgl" },  # 2005-06-03-15.42.50.363779; before IP masking
+    {   "pattern": r"(?<=^\S+ \d{10} )\d{4}\.(?:0[1-9]|1[0-2])\.(?:0[1-9]|[12]\d|3[01])(?=\s)",
+        "serial": "1",
+        "prefix":"ts_dotdate" },  # BGL/Thunderbird date after label and Unix time
+    {   "pattern": r"^\d{6,8}-(?:[01]?\d|2[0-3]):[0-5]?\d:[0-5]?\d:\d{1,3}(?=\|)",
+        "serial": "1",
+        "prefix":"ts_healthapp" },  # Unpadded date/time fields, e.g. 201811-10:2:0:19
+    {   "pattern": r"(?<=^nova-[^\s]*\.log(?:\.\d+)?\.)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])_(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?=\s)",
+        "serial": "1",
+        "prefix":"ts_openstack" },  # Preserve nova-*.log[.rotation]. before the timestamp
+
     {   "pattern": r"hdfs://[^\s()]+\(->/[^\s()]+\)",
         "serial": "1",
         "prefix":"hdfs_url" },
