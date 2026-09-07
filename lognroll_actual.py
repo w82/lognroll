@@ -1020,8 +1020,8 @@ number_patterns = [
 
     {   "pattern": "0x[\da-fA-F]+", # hexa num
         "type":"hexa1", 
-        "increment":"1", # not used
-        "serial": "1", # not used
+        "increment":"1",
+        "serial": "1",
         "matcher": None },
 
     {   "pattern": "[\da-fA-F]+",   # hexa num
@@ -1080,19 +1080,8 @@ def uniquify_numbers(tlogs):
                     tlogs[i][j] = p["serial"]
                     p["serial"] = str(int(p["serial"])+int(p["increment"]))
                 elif p["type"]=="hexa1":
-                    val = list(matched.group(0)[2:]) 
-                    for k in range(0,len(val)):
-                        c = val[k]
-                        if c in ['0','1','2','3','4','5','6','7','8','9']:
-                            val[k]=str(randint(0,9))
-                        elif c in ['a','b','c','d','e','f']:
-                            val[k]=['a','b','c','d','e','f'][randint(0,5)]
-                        elif c in ['A','B','C','D','E','F']:
-                            val[k]=['A','B','C','D','E','F'][randint(0,5)]
-                        else:
-                            print("ERROR 235 c=",c)
-                            sys.exit(0)
-                    tlogs[i][j] = "0x"+"".join(val)
+                    tlogs[i][j] = "~HEX"+format(int(p["serial"]),'09d')+"~"
+                    p["serial"] = str(int(p["serial"])+int(p["increment"]))
                 elif p["type"]=="hexa2": 
                     '''
                     if any(i.isdigit() for i in matched.group(0)):
