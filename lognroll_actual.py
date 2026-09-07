@@ -7,6 +7,7 @@ import sys
 import copy
 import time
 import uuid
+import json
 import numpy
 import argparse
 import pickle
@@ -2665,6 +2666,109 @@ def _evaluate_leaf(leaf_node, logs, score_cache, pair_cache, scoring_token_cache
     return LeafScore(leaf_node,selected,sum_matched,len(logs),SL,CPL,SL-CPL)
 
 
+def _collect_completed_leaf_nodes(tree):
+    leaf_nodes = []
+    for leaf_node in tree.nodes:
+        if not leaf_node.is_leaf_node():
+            continue
+        if -1 in leaf_node.all_vect:
+            print("Skipping unfinished leaf:", leaf_node.name)
+            continue
+        leaf_nodes.append(leaf_node)
+    return leaf_nodes
+
+
+def _display_template(template):
+    """Regex template -> human-readable form: drop the backslash escapes so
+    "\\[AsyncDispatcher event handler\\]" reads as "[AsyncDispatcher event
+    handler]" and "022db720\\(lo\\)" as "022db720(lo)". The ".*" wildcards carry
+    no backslash and pass through untouched. Matches the leaf-dump artifacts
+    (cassandra_leaf_divergence/cassandra_clean.json writes "DEBUG [.*]", not
+    "DEBUG \\[.*\\]").
+    """
+    return regex.sub(r"\\(.)", r"\1", template)
+
+
+def _leaf_template_assignment(leaf_node):
+    """The leaf's own log -> template assignment, straight from all_vect.
+
+    all_vect[log_index] is the index into leaf_node.log_templates of the template
+    that claimed that log during discovery, so this is a true partition: every
+    log belongs to exactly one template. Returns
+    ([template string, ...], [[log index, ...], ...]) in template-index order.
+    """
+    by_template_index = {}
+    for log_index, template_index in enumerate(leaf_node.all_vect):
+        by_template_index.setdefault(template_index, []).append(log_index)
+
+    templates = []
+    match_lists = []
+    for template_index in sorted(by_template_index):
+        entry = leaf_node.log_templates[template_index]
+        if entry is None:
+            continue
+        templates.append(_display_template(str(entry["template"])))
+        match_lists.append(by_template_index[template_index])
+    return templates, match_lists
+
+
+def _save_divergence_json(tree, logs, output_path):
+    """Write {logs, candidates, matches} for the completed leaves.
+
+    Same schema as the leaf-dump artifacts (hadoop_branch_stress.json,
+    cassandra_leaf_divergence/cassandra_clean.json):
+      logs       - the full preprocessed corpus, one string per line
+      candidates - {representative leaf name: [template, ...]}, one representative
+                   per distinct *effective* template set (same dedup as
+                   _select_best_leaf), so >1 key means the parallel branches
+                   diverged after dedup
+      matches    - {same leaf name: [[log index, ...], ...]}, parallel to
+                   candidates: the logs each template claimed, taken from the
+                   representative leaf's own all_vect, so every log appears under
+                   exactly one template
+
+    Dedup is on the effective template set; the per-leaf templates and matches
+    are the leaf's raw log_templates / all_vect assignment.
+    """
+    leaf_nodes = _collect_completed_leaf_nodes(tree)
+    coverage_cache = {}
+    groups = {}  # effective score_key -> {"rep": name, "templates": [...], "matches": [...]}
+    for leaf_node in leaf_nodes:
+        selected, _ = _build_effective_template_set(leaf_node.log_templates, logs, coverage_cache)
+        if len(selected) == 0:
+            continue
+        score_key = tuple(sorted((t["count"], t["template"]) for t in selected))
+        templates, match_lists = _leaf_template_assignment(leaf_node)
+        group = groups.get(score_key)
+        if group is None:
+            groups[score_key] = {"rep": leaf_node.name, "templates": templates, "matches": match_lists}
+        elif leaf_node.name < group["rep"]:
+            group["rep"] = leaf_node.name
+            group["templates"] = templates
+            group["matches"] = match_lists
+
+    candidates = {}
+    matches = {}
+    for group in groups.values():
+        candidates[group["rep"]] = group["templates"]
+        matches[group["rep"]] = group["matches"]
+
+    payload = {"logs": list(logs), "candidates": candidates, "matches": matches}
+    directory = os.path.dirname(output_path) or "."
+    os.makedirs(directory, exist_ok=True)
+    file_descriptor, temporary_path = tempfile.mkstemp(prefix=".divergence.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as file_handle:
+            json.dump(payload, file_handle, ensure_ascii=False)
+        os.replace(temporary_path, output_path)
+    except BaseException:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+        raise
+    print("Saved divergence JSON:", len(candidates), "candidate set(s),", output_path)
+    return output_path
+
+
 def _select_best_leaf(tree, logs):
     leaf_nodes = []
     for leaf_node in tree.nodes:
@@ -3466,6 +3570,7 @@ if __name__ == '__main__':
         parser.add_argument('--workers', type=int, default=1, help='Maximum concurrent candidate branches (default: 1).')
         parser.add_argument('--parallel-backend', choices=['process', 'thread'], default='process', help='Execution backend for --workers > 1 (default: process).')
         parser.add_argument('--seed', type=int, required=False, help='Seed Python and NumPy random generators for reproducible discovery.')
+        parser.add_argument('--divergence-json', action='store_true', help='Write {logs, candidates, matches} for the completed leaves after discovery to leaf_nodes/<input stem>.json next to this script.')
         # Now, we don't need clean mode
         parser.add_argument('--clean',  action='store_true', required=False, help='When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.')
 
@@ -3593,6 +3698,11 @@ if __name__ == '__main__':
 
     print("\033[1;34m",tree.show("top"),"...\033[0m")
     print(" ")
+
+    if args.divergence_json:
+        stem = os.path.splitext(os.path.basename(openfile_list[0].name))[0]
+        divergence_json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leaf_nodes", stem + ".json")
+        _save_divergence_json(tree, log_dataset.logs, divergence_json_path)
 
     scoring_checkpt = time.time()
     best_result = _select_best_leaf(tree,log_dataset.logs)
