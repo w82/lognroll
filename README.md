@@ -41,7 +41,7 @@ $ python ./lognroll_actual.py --logfile logs/hadoop_clean.log --workers 20 --par
 ### Execution Parameter
 * --linear: Whether to follow linear execution path along the tree or not.
 * --clean: When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.
-* --debug: When specified, it walks through each log processing and print out messages.
+* --debug: Save non-interactive diagnostics to `run_logs/debug-<timestamp>/` (printed at startup). Supports sequential, process, and thread backends. Each branch has an append-only `.log` event log with indented JSON records separated by blank lines (candidates, merges, match counts, failures), latest `-sample.json` (preprocessed matching logs and tokens before branch pattern replacement), latest `-candidate-input.json` (tokens after replacement, representative logs, discovered patterns), and `-failure-state.json` on failure (templates and assignments). `run.json` records arguments and runtime. Samples contain up to 1,000 logs and are overwritten per branch; events are retained. JSON snapshots use two-space indentation. Diagnostics contain log contents and add disk I/O. Without `--debug`, no diagnostic files are created.
 * --logfile: List of one or more input log files
 * --workers: Maximum number of candidate tree branches to explore concurrently, each in its own process or thread depending on --parallel-backend (default: 1). Ignored when --linear is set.
 * --parallel-backend: Execution backend for --workers > 1: "process" (default) or "thread" (experimental; only worth using under a free-threaded Python build).

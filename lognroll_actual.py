@@ -24,7 +24,55 @@ from random import randint
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 
-global debug_mode
+# Non-interactive file diagnostics enabled by --debug.
+debug_directory = None
+_debug_context = threading.local()
+
+
+def _debug_write(name, payload, append=False):
+    if debug_directory is None:
+        return
+    with open(os.path.join(debug_directory, name), "a" if append else "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, ensure_ascii=False, indent=2)+("\n\n" if append else "\n"))
+
+
+def _debug_event(event, **details):
+    if debug_directory is None:
+        return
+    branch = getattr(_debug_context, "branch", "main")
+    _debug_write(branch+".log", dict(event=event, time=datetime.now().isoformat(), pid=os.getpid(), thread=threading.get_ident(), branch=branch, **details), True)
+
+
+def _debug_branch(node, branch_path=None):
+    if debug_directory is None:
+        return
+    _debug_context.branch = "branch-"+("root" if branch_path == () else "-".join(map(str, branch_path))) if branch_path is not None else "node-"+str(node.identifier)
+    _debug_context.node = node
+
+
+def _debug_sample(node, sampled_logs, tokenized_logs, branch_path=None):
+    if debug_directory is None:
+        return
+    _debug_branch(node, branch_path)
+    _debug_write(_debug_context.branch+"-sample.json", dict(template_count=len(node.log_templates), remaining=node.all_vect.count(-1), logs=sampled_logs, tokens_before_patterns=tokenized_logs))
+    _debug_event("sample", count=len(sampled_logs), template_count=len(node.log_templates), remaining=node.all_vect.count(-1))
+
+
+def _debug_failure():
+    if debug_directory is None:
+        return
+    node = getattr(_debug_context, "node", None)
+    _debug_event("failure", traceback=traceback.format_exc() if sys.exc_info()[0] is not None else None)
+    if node is not None:
+        _debug_write(_debug_context.branch+"-failure-state.json", dict(templates=node.log_templates, representative_logs=node.rep_logs, assignments=node.all_vect, score_counts=node.score_counts))
+
+
+def _debug_excepthook(exc_type, exc_value, exc_traceback):
+    _debug_failure()
+    _debug_event("uncaught_exception", traceback="".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+
 global smask
 
 tm001=0.0
@@ -325,13 +373,9 @@ keyval_pattern = { "pattern":"[^\s~]+", "label": "~300~" }
 def split_by_delimiter(lvl, str_data, delim):
     global seqnum
 
-    #if debug_mode:
-    #    print " "*lvl+"\033[0;46m"+"Entering split_by_delimiter"+"\033[0m", "->"+str_data+"<-", "->"+delim+"<-"
 
     # if input string is just one delimiter character, just return it
     if str_data==delim:
-        #if debug_mode:
-        #    print " "*lvl+"\033[0;47m"+"Leaving split_by_delimiter"+"\033[0m", "->"+str_data+"<-", "->"+delim+"<-"
         return [delim]
 
     # TODO: I may need to convert all known patterns first before splitting by delimters.
@@ -366,8 +410,6 @@ def split_by_delimiter(lvl, str_data, delim):
         if "" in tokenized:
             tokenized.remove("")
             removed = True
-    #if debug_mode:
-    #    print " "*lvl+"Removed empty token"+"\033[93;44m"+str(tokenized)+"\033[0m"
 
     # process each token
     for i in reversed(list(range(0,len(tokenized)))):
@@ -376,11 +418,6 @@ def split_by_delimiter(lvl, str_data, delim):
         if tok==delim:
             continue
 
-        if debug_mode and len(tok)==0:
-            print(" "*lvl+"\033[0;31m"+"WARNING 742: zero length token detected -"+"\033[0m", str_data)
-            print(" "*(lvl+4), tokenized)
-            sys.exit(0)
-            continue
 
         # if any delimiter in lower priority than current one exists, recursively call the split_by_delimiter 
         low_delim_found = False
@@ -388,28 +425,15 @@ def split_by_delimiter(lvl, str_data, delim):
         for j in range(cur+1,len(delimiter_list)):
             if delimiter_list[j] in tok:
 
-                #if debug_mode:
-                #    print " "*lvl+"\033[0;42m"+"[split_by_delimiter("+delim+")] CALLING itself("+delimiter_list[j]+")"+"\033[0m ->"+tokenized[i]+"<-"
-                #    print " "*lvl, "****",tok, i
-                #    print " "*lvl, "****",tokenized
-                #    print " "*lvl, "****",tokenized[0:i]
-                #    print " "*lvl, "****",tokenized[i+1:]
 
                 tokenized = tokenized[:i] + split_by_delimiter(lvl+4, tok, delimiter_list[j]) + tokenized[i+1:]
 
-                #if debug_mode:
-                #    print " "*lvl+"\033[0;42m"+"[split_by_delimiter("+delim+")] Returned"+"\033[0m ->"+str(tokenized)+"<-"
-                #    print " "*lvl, "****",tokenized
 
                 low_delim_found = True
                 break
         #if not low_delim_found:
-        #    if debug_mode:
-        #        print " "*lvl+"\033[0;33m"+"[split_by_delimiter("+delim+")] CALLING detect_all_patterns()"+"\033[0m ->"+tokenized[i]+"<-"
         #    tokenized[i] = detect_all_patterns(lvl+4,tokenized[i])
 
-    #if debug_mode:
-    #    print " "*lvl+"\033[0;47m"+"Leaving split_by_delimiter"+"\033[0m", tokenized
     return tokenized
 
 
@@ -462,13 +486,6 @@ def custom_split(log):
                 middle_part = custom_split(log[spos+1:epos])
                 ending_part = custom_split(log[epos+1:])
 
-                #if debug_mode:
-                #    print " "*4+"Whole:",log
-                #    print " "*4+"spos=:",spos
-                #    print " "*4+"epos=:",epos
-                #    print " "*4+"Begin:",log[0:spos]
-                #    print " "*4+"Middle:",middle_part
-                #    print " "*4+"Ending:",ending_part
 
                 tokenized = split_by_delimiter(8,log[0:spos],' ') + [bracket_open] + middle_part + [bracket_close] + ending_part
 
@@ -488,8 +505,6 @@ def custom_split(log):
         middle_part = custom_split(log[spos+1:epos])
         tokenized = split_by_delimiter(4,log[0:spos],' ') + [bracket_open] + middle_part
 
-    #if debug_mode:
-    #    print "\033[0;35mcustom_split() returning: "+str(tokenized)+"\033[0m"
     return tokenized
 
 
@@ -570,8 +585,6 @@ def is_all_floatingpoint(numlist):
 
 def follows_format(klist):
 
-    #if debug_mode:
-    #    print "        [follows_format()] Entering. len=",len(klist)
 
     # if there are less than 3 values, it is too less to say whether there is a pattern or not
     if len(klist)<PATTERN_THRESHOLD:
@@ -582,8 +595,6 @@ def follows_format(klist):
     for w in klist[1:]:
         if slen!=len(w):
 
-    #        if debug_mode:
-    #            print "        [follows_format()] Various string length!"
 
             return False
     
@@ -1234,20 +1245,12 @@ def Determine_runlen_filter_word(token_d, tlogs, ftwords):
 #            if not pattern_exists:
 #                standalone_patterns.append(pat)
 #                new_pattern_added = True
-#                if debug_mode:
-#                    print "    [Determine_runlen_filter_word] \033[31;46m New pattern added \033[0m - ", pat
-#                    print "    [Determine_runlen_filter_word] \033[37;41m Current filter words:\033[0m - ", ftwords
-#                print "\033[31;46m New pattern added \033[0m - ", pat
 #
 #                # Update all the tokenized logs
 #                apply_new_patterns(tlogs)
 #                apply_new_patterns([ftwords]) # Update all the tokens in the filter words as well. Input should be list of list.
 #
-#                if debug_mode:
-#                    print "    [Determine_runlen_filter_word] \033[38;42m Updated filter words:\033[0m - ", ftwords
 #            else:
-#                if debug_mode:
-#                    print "    [Determine_runlen_filter_word] Pattern already exists - ", pat, str(ftwords)
             return "*"
         return sorted(token_d, key=lambda k: token_d[k], reverse=True)[0]
 
@@ -1256,40 +1259,26 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
 
     pv = compute_uniformity_pvalue(token_d)
     cr = 100.0*float(len(token_d))/float(tlen) # cardinality
-    if debug_mode:
-        print("    \033[34;46mpv:"+str(pv)+"\033[0m \033[34;42mcr:"+str(cr)+"\033[0m")
 
     # if there is only one word, just add it to the filter_words
     if len(token_d)==1:
-        if debug_mode:
-            print("    \033[43;5m"+"STATIC STRING because there is only one value in the dictionary."+"\033[0m")
         #print "\033[43;5m"+"STATIC STRING because there is only one value in the dictionary."+"\033[0m"
         return list(token_d.keys())[0], pv, cr
 
-    #if debug_mode:
-    #    print "    Tokens in the dictionary:",token_d.keys()
 
     if any(w in token_d for w in [" ", "@","<",">","=","(",")"]):
-        if debug_mode:
-            print("    \033[43;5m"+"STATIC STRING because special char (including space) is in the token keys."+"\033[0m")
         #print "\033[43;5m"+"STATIC STRING because special char (including space) is in the token keys."+"\033[0m"
         return sorted(token_d, key=lambda k: token_d[k], reverse=True)[0], pv, cr
 
     if are_all_numbers(list(token_d.keys())):
-        if debug_mode:
-            print("    \033[43;5m"+"WILDCARD because they are all numbers."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because they are all numbers."+"\033[0m"
         return '*', pv, cr
 
     is_custom_pattern_marker = all(token.startswith('~CP') and token.endswith('~') for token in token_d)
     if not is_custom_pattern_marker and follows_format(list(token_d.keys())):
-        if debug_mode:
-            print("    \033[43;5m"+"WILDCARD because new pattern is detected."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because new pattern is detected."+"\033[0m"
         return '*', pv, cr
     if pv>(1.0 + UNIFORM_THRESHOLD) / 2.0:
-        if debug_mode:
-            print("    \033[43;5m"+"WILDCARD because it is a uniform distribution."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because it is a uniform distribution."+"\033[0m"
         return '*', pv, cr
 
@@ -1298,16 +1287,12 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
 
     
     if are_all_hexa(list(token_d.keys())):
-        if debug_mode:
-            print("    \033[43;5m"+"WILDCARD because they are all hexadecimal numbers."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because they are all hexadecimal numbers."+"\033[0m"
         return '*', pv, cr
 
     token =  sorted(token_d, key=lambda k: token_d[k], reverse=True)[0]
     # A custom-pattern marker is converted to a wildcard during final template generation.
     if '~' in token.replace('~200~', '') and not token.startswith('~CP'):
-        if debug_mode:
-            print("    \033[43;5m"+"WILDCARD because it is a known pattern."+"\033[0m")
         #print "\033[43;5m"+"WILDCARD because it is a known pattern."+"\033[0m"
         return '*', pv, cr
 
@@ -1315,8 +1300,6 @@ def determine_filter_word(token_d, tlen, fillup_ratio):
     #    print "\033[43;5m"+"WILDCARD because fill-up ratio is reached."+"\033[0m", fillup_ratio
     #    return "*", pv, cr
 
-    if debug_mode:
-        print("    \033[43;5m"+"STATIC STRING because it did not meet any condition for the wildcard."+"\033[0m")
     #print "\033[43;5m"+"STATIC STRING because it did not meet any condition for the wildcard."+"\033[0m"
 
     return token, pv, cr
@@ -1357,8 +1340,6 @@ def match_and_remove(tmpl,logs):
         if matched!=None:
             match_count = match_count + 1
             to_delete.append(i)
-            #if debug_mode:
-            #    print "DEL:",log
 
     # delete matched logs
     before_removal = len(logs)
@@ -1382,8 +1363,6 @@ def exist_match(log_template, logs):
             continue
         matched = template_matcher.match(logs[i])
         if matched!=None:
-            if debug_mode:
-                print("\033[0;32mMatch found at "+str(i)+":", logs[i], "\033[0m ")
             return i
     return -1
 
@@ -1416,6 +1395,7 @@ def mark_matched_logs(logs, vect, rlogs, log_template, i, score_counts=None, log
     marked = 0 # how many logs match to the log template?
     replog_selected = False
 
+    _debug_event("match_start", template=log_template, template_index=i)
     template_matcher = regex.compile("^"+log_template+"$")
 
     for j in range(0,len(logs)):
@@ -1445,6 +1425,9 @@ def mark_matched_logs(logs, vect, rlogs, log_template, i, score_counts=None, log
 #        sys.exit(0)
 
     #print "Leaving mark_matched_logs()"
+    _debug_event("match_result", template=log_template, matched=marked)
+    if marked == 0:
+        _debug_failure()
     return marked
 
 
@@ -1546,11 +1529,6 @@ def sample_by_token_length_and_space_count(logs, tlogs, vect, log_scores, score_
 
     most_popular = max(score_counts, key=score_counts.get)
 
-    if debug_mode:
-        print("** Summary of log groups using characters **")
-        for score in sorted(score_counts, key=score_counts.get, reverse=True)[:20]:
-            print("  For the key of",format(score,'5d')+",", format(score_counts[score], '5d'),"logs are grouped.")
-        print("    ...")
 
     selected = []
     tselected = []
@@ -1712,8 +1690,6 @@ def select_significant_terms(tlog_data):
     wl = sorted(wd, key=lambda k: wd[k], reverse=True)
     elapsed = time.time() - tm_checkpt
     #print "{0:.3f}".format(elapsed),"Creating bag-of-words took"
-    if debug_mode:
-        print("The length of bag-of-words list:",len(wl))
     return wd, wl
 
 
@@ -1734,8 +1710,6 @@ def build_term_vectors(wl,tlog_data):
         vectors.append(ivect)
     elapsed = time.time() - tm_checkpt
     #print "{0:.3f}".format(elapsed),"Creating indicator vectors for all words"
-    if debug_mode:
-        print("Length of vectors:",len(vectors))
     return vectors
 
 
@@ -1832,8 +1806,6 @@ def display_term_groups(correlation_dict, word_dict):
         # circle members determined at this point
         circ = []
     elapsed = time.time() - tm_checkpt
-    if debug_mode:
-        print("Displaying term groups took", elapsed, "seconds")
     return
 
 
@@ -1868,8 +1840,6 @@ def determine_term_groups(correlation_dict, word_dict, logs):
         if len(circ)>=2:
             # counting inclusion of all terms is very costly
             #print word, " "*(max_word_length-len(word)), format(len(correlation_dict[word]),'3d'), format(len(circ),'3d'), format(multiple_term_inclusion_count(logs,circ),'5d'), circ
-            if debug_mode:
-                print(word, " "*(max_word_length-len(word)), format(len(correlation_dict[word]),'3d'), format(len(circ),'3d'), circ)
             tgrp.append(sorted(circ))
         # circle members determined at this point
         circ = []
@@ -2258,7 +2228,9 @@ def finalize_filter_with_star(fword,fmask):
 def construct_candidate_log_templates(input_logs, rep_logs):
 
     global tm005
-    global debug_mode
+
+    if debug_directory is not None:
+        _debug_write(_debug_context.branch+"-candidate-input.json", dict(tokens=input_logs, representative_logs=rep_logs, discovered_patterns=_get_discovered_patterns(), seqnum=_get_seqnum(), random_state=(_thread_local_discovery.rng if _thread_local_discovery_active() else random).getstate()))
 
     valid_mask = [1]*len(input_logs)
 
@@ -2275,12 +2247,7 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 
         filtered_logs = do_filtering(input_logs, valid_mask, filter_words, filter_mask)
 
-        if debug_mode:
-            print("XXXXXXXX check 001")
-            input("\033[0;35m->Press ENTER to continue filtering ...\033[0m")
 
-        if debug_mode:
-            print("Updating column_cnt from", column_cnt,"to",max(len(x) for x in filtered_logs))
             #for x in filtered_logs:
             #    print "    ",x
         column_cnt = max(len(x) for x in filtered_logs)
@@ -2346,17 +2313,12 @@ def construct_candidate_log_templates(input_logs, rep_logs):
                 filter_mask[tpos] = 1
                 filter_words[tpos] = runlength_token
 
-                if debug_mode:
-                    print("\033[0;36mAdding single-valued column to the filter\033[0m [tpos:"+str(tpos)+"]", "->"+runlength_token+"<-", runlength)
                 #print "\033[0;36mAdding single-valued column to the filter\033[0m [tpos:"+str(tpos)+"]", "->"+runlength_token+"<-", runlength
 
                 token_added_order.append(runlength_token)
                 count_added_order.append(1) 
 
         if 0 not in filter_mask: 
-            if debug_mode:
-                print("Exiting loop since all filters are determined.", filter_mask)
-                print("->filter_words:", filter_words)
             break
 
         if len(max_runlen_positions)>1:
@@ -2370,35 +2332,11 @@ def construct_candidate_log_templates(input_logs, rep_logs):
 
         if max_runlen_pos>=0: 
 
-            if debug_mode:
-                print("max_column:"+str(max_runlen_pos)+",\033[35;47mCalling determine_filter_word ...\033[0m")
             target_dict = all_column_dict[max_runlen_pos] 
             filled = float(sum(filter_mask))/float(len(filter_mask)) 
             new_fword, pv, cr = determine_filter_word(target_dict, len(filtered_logs), filled)
             #print "{0:.5f}".format(pv), "{0:.5f}".format(cr), "---->"+new_fword
 
-            if debug_mode:
-                print("max_column:"+str(max_runlen_pos)+",\033[35;47mdetermine_filter_word returned:\033[0m", "->"+new_fword+"<-")
-                print("*** Max token from each column ***")
-                for h in all_column_dict: # h is a column position
-                    d = all_column_dict[h]
-                    for n in sorted(d, key=lambda k: d[k], reverse=True):
-                        print("["+str(h)+"]",d[n], "\t","->"+n+"<-")
-                        break
-            if debug_mode and ' ' not in target_dict and '=' not in target_dict:
-                print("------------------------------------------------------------")
-                print("[Column:"+str(max_runlen_pos)+"]", "\033[1;91mpval:",pv,"\033[0m", "Cardinality:", "{0:.2f}".format(cr),"%")
-                print("------------------------------------------------------------")
-                print("num  |   count   |       token      ")
-                print("------------------------------------------------------------")
-                # print each line
-                cnt = 1
-                for n in sorted(target_dict, key=lambda k: target_dict[k], reverse=True):
-                    print("["+str(cnt)+"]\t",target_dict[n], "\t\t","->"+n+"<-")
-                    cnt += 1
-                    if cnt>40:
-                        print("...")
-                        break
 
 # we want to see new fword
 #            print('new fword: ' + new_fword)
@@ -2446,27 +2384,8 @@ def construct_candidate_log_templates(input_logs, rep_logs):
                 count_added_order.append(len(target_dict))
             #print "\033[0;35mNew filter word\033[0m [tpos:"+str(max_runlen_pos)+"]", "=>"+new_fword+"<="
 
-        if debug_mode:
-            print("Current column_cnt:",column_cnt)
-            print("Max runlength percent:", "{0:.2f}".format(max_runlen_pct),"%")
-            print("Max runlength percent position:", max_runlen_pos)
-            print("\033[1;94mMax runlength percent word :", "->"+filter_words[max_runlen_pos]+"<-\033[0m")
-            print("sum of valid_mask:", sum(valid_mask))
-            print("filter_mask(sum:"+str(sum(filter_mask))+"/"+str(len(filter_mask))+"):","".join(str(x) for x in filter_mask))
-            print("Filtering logs using filter_words:",filter_words, len(filter_words))
-
-            #print "Added order:", "\033[1;95m|\033[0m".join(token_added_order)
-            #print "Cardinality order:", "\033[1;95m|\033[0m".join(count_added_order)
-            print("\033[1;95mToken list in the added order:(The number is the count of unique tokens.)\033[0m")
-            for w in range(0,len(token_added_order)):
-                print("        ", format(count_added_order[w],'3d'),token_added_order[w])
-
-            input("\033[0;35m->Press ENTER to continue filtering ...\033[0m")
-            print(" ")
 
         #print "filter_vect(sum:"+str(sum(filter_mask))+"/"+str(len(filter_mask))+"):","".join(str(x) for x in filter_mask)
-        if debug_mode:
-            print("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
     # END of inner while loop
 
     elapsed = time.time() - tm_checkpt
@@ -2484,7 +2403,9 @@ def construct_candidate_log_templates(input_logs, rep_logs):
     candidate_set.append(log_template)
 
     # Identical templates represent the same Tree branch.
-    return list(dict.fromkeys(candidate_set))
+    candidate_set = list(dict.fromkeys(candidate_set))
+    _debug_event("candidates", templates=candidate_set)
+    return candidate_set
 
 
 # Longest common subsequence
@@ -2997,25 +2918,17 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
         #sampled_logs = sample_by_signature(all_logs, RANDOM_SAMPLE_SIZE)
         if len(sampled_logs)==0:
             break
-        if debug_mode:
-            print("\033[93;100mSampled_logs size:", len(sampled_logs),"\033[0m ")
-            for i in range(0,len(sampled_logs)):
-                print("    [Sampled]", sampled_logs[i])
-                print("             ", "".join(tokenized_logs[i]))
 
         #tokenized_logs = do_tokenization(sampled_logs)
         #sampled_logs,tokenized_logs = sample_by_term_correlation(all_logs, RANDOM_SAMPLE_SIZE)
 
-        if debug_mode:
-            print("Number of logs:",len(sampled_logs))
-            print("Number of tokenized logs:",len(tokenized_logs))
 
         #apply_all_patterns(tokenized_logs)
+        _debug_sample(cur_node, sampled_logs, tokenized_logs)
         replace_known_patterns(tokenized_logs)
 
 
         #if len(cur_node.log_templates)==167:
-        #    debug_mode = True
 
     
         candidate_set = construct_candidate_log_templates(tokenized_logs,cur_node.rep_logs) # returns a list of candidate log templates
@@ -3056,6 +2969,7 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
                 new_node.print_node()
     
                 # Mark matched logs from all_logs using new log template. 
+                _debug_branch(new_node)
                 removed_count = mark_matched_logs(log_dataset.logs, new_node.all_vect, new_node.rep_logs, log_template, len(new_node.log_templates), new_node.score_counts, log_dataset.log_scores)
                 if removed_count==0:
                     print("\n\033[1;94mWARNING[1]:\033[0m No logs removed from the template!")
@@ -3102,6 +3016,7 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
                         print("   Token to update:", tok_logtm[diff_loc])
                         tok_logtm[diff_loc]="*"
                         log_template = generate_log_template_star(tok_logtm,True)
+                        _debug_event("merge", old_index=i, old_template=cur_node.log_templates[i]["template"], merged_template=log_template)
                         tok_candi = tokenize_template_to_fwords(log_template)
                         print("   New log_template:", log_template)
                         merged_template_indices.append(i)
@@ -3153,11 +3068,7 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
                 break
             print("\033[1;94m=> Switching to ",cur_node.name,"\033[0m")
 
-        if debug_mode:
-            input("\033[1;94m->Press ENTER to continue ...\033[0m")
-
         #print "============================================================================================================="
-        #raw_input("\033[1;94m->Press ENTER to continue ...\033[0m")
 
     print("Final custom pattern count:", len(discovered_patterns))
     return time.time() - runtime_checkpt
@@ -3252,6 +3163,8 @@ def _merge_branch_patterns(global_patterns, branch_patterns):
 
 
 def _apply_candidate_to_branch(node, branch_state, log_template, log_dataset):
+    _debug_branch(node, branch_state.branch_path)
+    _debug_event("apply_split", template=log_template)
     if exist_match(log_template, node.rep_logs) >= 0:
         raise RuntimeError("candidate overlaps with an existing template: "+str(log_template))
     removed_count = mark_matched_logs(log_dataset.logs, node.all_vect, node.rep_logs, log_template, len(node.log_templates), node.score_counts, log_dataset.log_scores)
@@ -3262,6 +3175,8 @@ def _apply_candidate_to_branch(node, branch_state, log_template, log_dataset):
 
 
 def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
+    _debug_branch(node, branch_state.branch_path)
+    _debug_event("apply_linear", template=log_template)
     tok_candi = tokenize_template_to_fwords(log_template)
     merged_template_indices = []
     for index, old_template in enumerate(node.log_templates):
@@ -3275,6 +3190,7 @@ def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
             continue
         tok_logtm[diff_locations[0]] = "*"
         log_template = generate_log_template_star(tok_logtm,True)
+        _debug_event("merge", old_index=index, old_template=old_template["template"], merged_template=log_template)
         tok_candi = tokenize_template_to_fwords(log_template)
         merged_template_indices.append(index)
         node.log_templates[index] = None
@@ -3296,13 +3212,7 @@ def _run_branch_until_split_or_leaf(node, branch_state, log_dataset, tokenized_l
         sampled_logs, tokenized_logs = sample_by_token_length_and_space_count_multiprocessing(log_dataset, branch_state, node, tokenized_log_store)
         if len(sampled_logs) == 0:
             break
-        if debug_mode:
-            print("\033[93;100mSampled_logs size:", len(sampled_logs),"\033[0m ")
-            for i in range(0,len(sampled_logs)):
-                print("    [Sampled]", sampled_logs[i])
-                print("             ", "".join(tokenized_logs[i]))
-            print("Number of logs:",len(sampled_logs))
-            print("Number of tokenized logs:",len(tokenized_logs))
+        _debug_sample(node, sampled_logs, tokenized_logs, branch_state.branch_path)
         replace_known_patterns(tokenized_logs)
         apply_new_patterns_multiprocessing(tokenized_logs)
         candidate_set = construct_candidate_log_templates(tokenized_logs, node.rep_logs)
@@ -3312,8 +3222,6 @@ def _run_branch_until_split_or_leaf(node, branch_state, log_dataset, tokenized_l
             _capture_branch_state(branch_state)
             return candidate_set
         _apply_linear_candidate(node, branch_state, candidate_set[0], log_dataset)
-        if debug_mode:
-            input("\033[1;94m->Press ENTER to continue ...\033[0m")
     _capture_branch_state(branch_state)
     if not node.is_leaf_node() or -1 in node.all_vect:
         raise RuntimeError("Branch stopped before covering all logs: "+str(branch_state.branch_path))
@@ -3361,6 +3269,7 @@ def _run_parallel_pool_worker_branch(node, branch_state, candidate, candidate_in
             return BranchResult("leaf", node=node, branch_state=branch_state, timers=_discovery_timer_snapshot())
         return BranchResult("split", node=node, branch_state=branch_state, candidate_set=candidate_set, timers=_discovery_timer_snapshot())
     except BaseException:
+        _debug_failure()
         return BranchResult("failure", branch_state=branch_state, failure_traceback=traceback.format_exc(), timers=_discovery_timer_snapshot())
 
 
@@ -3493,6 +3402,7 @@ def _run_branch_until_split_or_leaf_thread(node, branch_state, log_dataset, all_
         sampled_logs, tokenized_logs = sample_by_token_length_and_space_count_thread(log_dataset, branch_state, node, all_tlogs)
         if len(sampled_logs) == 0:
             break
+        _debug_sample(node, sampled_logs, tokenized_logs, branch_state.branch_path)
         replace_known_patterns(tokenized_logs)
         apply_new_patterns_multiprocessing(tokenized_logs)
         candidate_set = construct_candidate_log_templates(tokenized_logs, node.rep_logs)
@@ -3519,6 +3429,7 @@ def _run_parallel_thread_worker_branch(log_dataset, all_tlogs, node, branch_stat
             return BranchResult("leaf", node=node, branch_state=branch_state, timers=(0.0,)*11)
         return BranchResult("split", node=node, branch_state=branch_state, candidate_set=candidate_set, timers=(0.0,)*11)
     except BaseException:
+        _debug_failure()
         return BranchResult("failure", branch_state=branch_state, failure_traceback=traceback.format_exc(), timers=(0.0,)*11)
 
 
@@ -3594,12 +3505,11 @@ def _run_parallel_tree_discovery_thread(tree, log_dataset, all_tlogs, worker_cou
 
 
 if __name__ == '__main__':
-    debug_mode = False
     openfile_list = []
     try:
         parser = argparse.ArgumentParser(description="")
         parser.add_argument('--logfile',  type=argparse.FileType('r'), nargs='+', required=True, help='List of one or more input log files')
-        parser.add_argument('--debug',  action='store_true', required=False, help='When specified, it walks through each log processing and print out messages.')
+        parser.add_argument('--debug',  action='store_true', required=False, help='Save branch diagnostics and failure context under run_logs/ without interactive pauses.')
         parser.add_argument('--linear',  action='store_true', required=False, help='Whether to follow linear execution path along the tree or not.')
         parser.add_argument('--workers', type=int, default=1, help='Maximum concurrent candidate branches (default: 1).')
         parser.add_argument('--parallel-backend', choices=['process', 'thread'], default='process', help='Execution backend for --workers > 1 (default: process).')
@@ -3612,8 +3522,6 @@ if __name__ == '__main__':
         args.clean = True
         if args.workers < 1:
             parser.error('--workers must be at least 1')
-        if args.debug and args.workers > 1:
-            parser.error('--debug cannot be used with --workers > 1')
         if args.seed is not None:
             random.seed(args.seed)
             numpy.random.seed(args.seed)
@@ -3623,10 +3531,13 @@ if __name__ == '__main__':
             print("Specify only one log file. Currently",len(openfile_list),"are given.")
             sys.exit(0)
 
-        if args.debug==False:
-            debug_mode = False
-        else:
-            debug_mode = bool(args.debug)
+        if args.debug:
+            os.makedirs("run_logs", exist_ok=True)
+            debug_directory = os.path.abspath(os.path.join("run_logs", "debug-"+datetime.now().strftime("%Y%m%d-%H%M%S")))
+            os.makedirs(debug_directory)
+            _debug_write("run.json", dict(argv=sys.argv, input_files=[os.path.abspath(f.name) for f in args.logfile], seed=args.seed, workers=args.workers, backend=args.parallel_backend, linear=args.linear, python=sys.version, source_file=os.path.abspath(__file__)))
+            sys.excepthook = _debug_excepthook
+            print("Debug diagnostics:", debug_directory, flush=True)
 
         if args.linear==False:
             linear_mode = False
@@ -3756,3 +3667,4 @@ if __name__ == '__main__':
     print("Final template count:", len(best_result.selected))
     for t in sorted(best_result.selected, key=lambda k: k["count"], reverse=True):
         print(t["count"],t["template"])
+    _debug_write("completed.json", dict(best_leaf=best_node.identifier, template_count=len(best_result.selected), score=best_result.score))
