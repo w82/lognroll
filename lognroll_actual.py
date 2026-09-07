@@ -2781,7 +2781,19 @@ def _save_divergence_json(tree, logs, output_path):
     file_descriptor, temporary_path = tempfile.mkstemp(prefix=".divergence.", suffix=".tmp", dir=directory)
     try:
         with os.fdopen(file_descriptor, "w", encoding="utf-8") as file_handle:
-            json.dump(payload, file_handle, ensure_ascii=False)
+            file_handle.write('{\n  "logs": [')
+            for index, log in enumerate(payload["logs"]):
+                file_handle.write((',' if index else '') + '\n    ' + json.dumps(log, ensure_ascii=False))
+            file_handle.write('\n  ],')
+            for field in ("candidates", "matches"):
+                file_handle.write('\n  ' + json.dumps(field) + ': {')
+                for group_index, (name, entries) in enumerate(payload[field].items()):
+                    file_handle.write((',' if group_index else '') + '\n    ' + json.dumps(name, ensure_ascii=False) + ': [')
+                    for entry_index, entry in enumerate(entries):
+                        file_handle.write((',' if entry_index else '') + '\n      ' + json.dumps(entry, ensure_ascii=False))
+                    file_handle.write('\n    ]')
+                file_handle.write('\n  }' + (',' if field == "candidates" else ''))
+            file_handle.write('\n}\n')
         os.replace(temporary_path, output_path)
     except BaseException:
         if os.path.exists(temporary_path):
