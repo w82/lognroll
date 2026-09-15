@@ -1,5 +1,6 @@
 /run_logs/*
 /loghub-2.0_logs/*
 /CODE50_REUSE.p
+/CODE50_PROCESS_TOKEN_STORE/
 /.idea/*
 /leaf_nodes/*

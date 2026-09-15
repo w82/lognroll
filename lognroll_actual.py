@@ -18,6 +18,8 @@ import concurrent.futures
 import traceback
 import queue
 import tempfile
+import hashlib
+import shutil
 import struct
 from scipy import stats
 from random import randint
@@ -1665,28 +1667,149 @@ def do_tokenization(logs):
     return tlogs
 
 
+PROCESS_TOKEN_STORE_CACHE_VERSION = 1
+PROCESS_TOKEN_STORE_CACHE_DIRECTORY = "CODE50_PROCESS_TOKEN_STORE"
 PROCESS_TOKEN_STORE_BATCH_SIZE = 10000
 
 
-def build_process_token_store(logs, directory, batch_size=PROCESS_TOKEN_STORE_BATCH_SIZE):
+def _sha256_file(filename):
+    digest = hashlib.sha256()
+    with open(filename, "rb") as stream:
+        for chunk in iter(lambda:stream.read(1024*1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _process_token_store_paths(cache_directory):
+    return {
+        "tokens":os.path.join(cache_directory, "tokenized-logs.pickle"),
+        "offsets":os.path.join(cache_directory, "tokenized-logs.offsets"),
+        "metadata":os.path.join(cache_directory, "metadata.json"),
+    }
+
+
+def _process_token_store_identity(input_filename):
+    return {
+        "input_path":os.path.abspath(input_filename),
+        "input_sha256":_sha256_file(input_filename),
+        "source_sha256":_sha256_file(os.path.abspath(__file__)),
+    }
+
+
+def _number_pattern_serials():
+    return [pattern["serial"] for pattern in number_patterns]
+
+
+def _restore_number_pattern_serials(serials):
+    if len(serials) != len(number_patterns):
+        raise RuntimeError("Token-store cache has incompatible number-pattern state")
+    for pattern, serial in zip(number_patterns, serials):
+        pattern["serial"] = str(serial)
+
+
+def _validate_process_token_store(store):
+    if os.path.getsize(store.offset_filename) != store.log_count*8:
+        return False
+    try:
+        if store.log_count > 0:
+            store.read(0)
+            store.read(store.log_count-1)
+    except (EOFError, OSError, pickle.UnpicklingError, RuntimeError, IndexError):
+        return False
+    finally:
+        store.close()
+    return True
+
+
+def load_process_token_store_cache(input_filename, log_count, cache_directory=PROCESS_TOKEN_STORE_CACHE_DIRECTORY):
+    paths = _process_token_store_paths(cache_directory)
+    if not all(os.path.exists(paths[key]) for key in ("tokens", "offsets", "metadata")):
+        return None
+    try:
+        with open(paths["metadata"], "r", encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        if metadata.get("complete") is not True or metadata.get("version") != PROCESS_TOKEN_STORE_CACHE_VERSION:
+            return None
+        if metadata.get("identity") != _process_token_store_identity(input_filename):
+            return None
+        if metadata.get("log_count") != log_count:
+            return None
+        cached_seqnum = int(metadata["seqnum"])
+        cached_serials = metadata["number_pattern_serials"]
+        if not isinstance(cached_serials, list) or len(cached_serials) != len(number_patterns):
+            return None
+        cached_serials = [str(int(serial)) for serial in cached_serials]
+        store = TokenizedLogFileStore(paths["tokens"], paths["offsets"], log_count)
+        if not _validate_process_token_store(store):
+            return None
+        global seqnum
+        seqnum = cached_seqnum
+        _restore_number_pattern_serials(cached_serials)
+        return store
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+        return None
+
+
+def build_process_token_store(logs, input_filename, cache_directory=PROCESS_TOKEN_STORE_CACHE_DIRECTORY, batch_size=PROCESS_TOKEN_STORE_BATCH_SIZE):
     """Tokenize and number rows in order, retaining only one batch before writing it."""
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
-    filename = os.path.join(directory, "tokenized-logs.pickle")
-    offset_filename = os.path.join(directory, "tokenized-logs.offsets")
+    cache_directory = os.path.abspath(cache_directory)
+    parent_directory = os.path.dirname(cache_directory)
+    cache_name = os.path.basename(cache_directory)
+    build_directory = os.path.join(parent_directory, "."+cache_name+".building-"+str(os.getpid()))
+    if os.path.exists(build_directory):
+        raise RuntimeError("Token-store build directory already exists: "+build_directory)
+    os.makedirs(build_directory)
+    paths = _process_token_store_paths(build_directory)
+    max_batch_rows = 0
     global tm004
-    with open(filename, "wb") as token_stream, open(offset_filename, "wb") as offset_stream:
-        for batch_start in range(0, len(logs), batch_size):
-            batch_logs = logs[batch_start:batch_start+batch_size]
-            token_checkpt = time.time()
-            batch_tlogs = [custom_split(log) for log in batch_logs]
-            tm004 += time.time()-token_checkpt
-            uniquify_numbers(batch_tlogs)
-            for tlog in batch_tlogs:
-                offset_stream.write(struct.pack("<Q", token_stream.tell()))
-                pickle.dump(tlog, token_stream, pickle.HIGHEST_PROTOCOL)
-            batch_tlogs.clear()
-    return TokenizedLogFileStore(filename, offset_filename, len(logs))
+    backup_directory = None
+    try:
+        with open(paths["tokens"], "wb") as token_stream, open(paths["offsets"], "wb") as offset_stream:
+            for batch_start in range(0, len(logs), batch_size):
+                batch_logs = logs[batch_start:batch_start+batch_size]
+                token_checkpt = time.time()
+                batch_tlogs = [custom_split(log) for log in batch_logs]
+                tm004 += time.time()-token_checkpt
+                uniquify_numbers(batch_tlogs)
+                max_batch_rows = max(max_batch_rows, len(batch_tlogs))
+                for tlog in batch_tlogs:
+                    offset_stream.write(struct.pack("<Q", token_stream.tell()))
+                    pickle.dump(tlog, token_stream, pickle.HIGHEST_PROTOCOL)
+                batch_tlogs.clear()
+        metadata = {
+            "complete":True,
+            "version":PROCESS_TOKEN_STORE_CACHE_VERSION,
+            "identity":_process_token_store_identity(input_filename),
+            "log_count":len(logs),
+            "seqnum":seqnum,
+            "number_pattern_serials":_number_pattern_serials(),
+            "batch_size":batch_size,
+            "max_batch_rows":max_batch_rows,
+        }
+        with open(paths["metadata"], "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.path.exists(cache_directory):
+            if not os.path.isdir(cache_directory):
+                raise RuntimeError("Token-store cache path is not a directory: "+cache_directory)
+            backup_directory = os.path.join(parent_directory, "."+cache_name+".previous-"+str(os.getpid()))
+            if os.path.exists(backup_directory):
+                raise RuntimeError("Token-store backup directory already exists: "+backup_directory)
+            os.replace(cache_directory, backup_directory)
+        os.replace(build_directory, cache_directory)
+        if backup_directory is not None:
+            shutil.rmtree(backup_directory)
+        final_paths = _process_token_store_paths(cache_directory)
+        return TokenizedLogFileStore(final_paths["tokens"], final_paths["offsets"], len(logs))
+    except BaseException:
+        if os.path.exists(build_directory):
+            shutil.rmtree(build_directory)
+        if backup_directory is not None and os.path.exists(backup_directory) and not os.path.exists(cache_directory):
+            os.replace(backup_directory, cache_directory)
+        raise
 
 
 def select_significant_terms(tlog_data):
@@ -2903,7 +3026,6 @@ prepopulated_log_templates = []
 #rep_logs = [] 
 
 reuse_filename="CODE50_REUSE.p"
-reuse_logfilename="CODE50_REUSE_LOG.p"
 
 # Discovery execution backend.  Keep multiprocessing coordination in this
 # section so the CLI, candidate construction, matching, and leaf scoring stay
@@ -3541,7 +3663,6 @@ if __name__ == '__main__':
         parser.add_argument('--clean',  action='store_true', required=False, help='When specified, it deletes intermediate pickle files of tokenized log data and reprocess them. It takes longer.')
 
         args = parser.parse_args()
-        args.clean = True
         if args.workers < 1:
             parser.error('--workers must be at least 1')
         if args.seed is not None:
@@ -3567,28 +3688,15 @@ if __name__ == '__main__':
             linear_mode = bool(args.linear)
 
         process_token_store_mode = args.workers > 1 and not linear_mode and args.parallel_backend == "process"
-        if os.path.exists(reuse_logfilename):
-            prev_reuse_logfilename = pickle.load(open(reuse_logfilename,"r"))
-        else:
-            prev_reuse_logfilename = "-"
-
-        print("** Previous log file:",prev_reuse_logfilename)
-        print("**    Input log file:",openfile_list[0].name)
-
-        clean_mode = False
-        if args.clean==False:
-            if prev_reuse_logfilename==openfile_list[0].name:
-               clean_mode = False
-               print("\033[2;102mNon-Clean (cache reuse, fast) mode\033[0m")
-            else:
-                print("\033[31;91mAlthough you wanted FAST REUSE mode, the input log file is different from the previous run. Forcing clean mode ... \033[0m")
-                print("\033[37;101mClean (slow) mode\033[0m")
-                clean_mode = True
-                os.remove(reuse_logfilename)
-                pickle.dump(openfile_list[0].name, open(reuse_logfilename,"w"))
-        else:
-            print("\033[37;101mClean (slow) mode\033[0m")
+        if process_token_store_mode:
             clean_mode = bool(args.clean)
+            print("Process token-store mode:", "rebuild" if clean_mode else "cache reuse when valid")
+        else:
+            # The legacy full-table cache is deliberately not reused outside the process store path.
+            # Thread and sequential execution still require the in-memory token table.
+            args.clean = True
+            print("\033[37;101mClean (slow) mode\033[0m")
+            clean_mode = True
 
     except Exception as e:
         print(('Error: %s' % str(e)))
@@ -3612,17 +3720,16 @@ if __name__ == '__main__':
 
     all_tlogs = None
     tokenized_log_store = None
-    token_directory = None
     if process_token_store_mode:
-        token_directory = tempfile.TemporaryDirectory(prefix="lognroll-token-store-")
-        try:
+        if not clean_mode:
+            tokenized_log_store = load_process_token_store_cache(openfile_list[0].name, len(all_logs))
+        if tokenized_log_store is None:
             print("Sequence number:", seqnum)
             print("Tokenizing, numbering, and indexing logs in batches.")
-            tokenized_log_store = build_process_token_store(all_logs, token_directory.name)
+            tokenized_log_store = build_process_token_store(all_logs, openfile_list[0].name)
             print("Done tokenizing and indexing.", len(all_logs))
-        except BaseException:
-            token_directory.cleanup()
-            raise
+        else:
+            print("Reusing indexed process token store.")
     else:
         if clean_mode and os.path.exists(reuse_filename):
             os.remove(reuse_filename)
@@ -3655,11 +3762,7 @@ if __name__ == '__main__':
     root_node = tree.create_node("TOP", log_dataset.log_count, "top")
     root_node.score_counts = dict(Counter(all_log_scores))
 
-    try:
-        discovery_elapsed = run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, args.workers, args.parallel_backend, tokenized_log_store)
-    finally:
-        if token_directory is not None:
-            token_directory.cleanup()
+    discovery_elapsed = run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, args.workers, args.parallel_backend, tokenized_log_store)
     parallel_mode = args.workers > 1 and not linear_mode
     if parallel_mode:
         print("Timing mode: aggregate worker work; wall-clock runtime is reported below.")
