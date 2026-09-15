@@ -464,6 +464,9 @@ def custom_split(log):
     pstack = [] # for storing index
     qstack = [] # for storing char in case of ' or "
     for i,c in enumerate(log):
+        # Other quotes and brackets inside a quote are literal content.
+        if qstack and c != qstack[-1]:
+            continue
         if (c==bracket_open and c not in ["'","\""]) or (c=="'" and "'" not in qstack) or (c=="\"" and "\"" not in qstack):
             pstack.append(i)
             if c in ["'","\""]:
