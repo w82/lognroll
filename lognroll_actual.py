@@ -17,8 +17,8 @@ import multiprocessing
 import concurrent.futures
 import traceback
 import queue
-import gc
 import tempfile
+import struct
 from scipy import stats
 from random import randint
 from collections import Counter, defaultdict, deque
@@ -171,39 +171,41 @@ class LogDataset:
 
 
 class TokenizedLogFileStore:
-    """Store all tokenized logs in a temporary file and load requested logs by index."""
+    """Store tokenized logs in indexed files and load a requested row by index."""
 
-    def __init__(self, filename, offsets):
+    def __init__(self, filename, offset_filename, log_count):
         self.filename = filename
-        self.offsets = offsets
+        self.offset_filename = offset_filename
+        self.log_count = log_count
         self.file_handle = None
-
-    @classmethod
-    def write(cls, all_tlogs, directory):
-        filename = os.path.join(directory, "tokenized-logs.pickle")
-        offsets = []
-        with open(filename, "wb") as file_handle:
-            for tlog in all_tlogs:
-                offsets.append(file_handle.tell())
-                pickle.dump(tlog, file_handle, pickle.HIGHEST_PROTOCOL)
-        return cls(filename, offsets)
+        self.offset_handle = None
 
     def open(self):
         if self.file_handle is None:
             self.file_handle = open(self.filename, "rb")
+            self.offset_handle = open(self.offset_filename, "rb")
 
     def read(self, log_index):
         self.open()
-        self.file_handle.seek(self.offsets[log_index])
+        if log_index < 0 or log_index >= self.log_count:
+            raise IndexError("Tokenized log index out of range: "+str(log_index))
+        self.offset_handle.seek(log_index*8)
+        packed_offset = self.offset_handle.read(8)
+        if len(packed_offset) != 8:
+            raise RuntimeError("Missing tokenized-log offset for index "+str(log_index))
+        self.file_handle.seek(struct.unpack("<Q", packed_offset)[0])
         return pickle.load(self.file_handle)
 
     def close(self):
         if self.file_handle is not None:
             self.file_handle.close()
             self.file_handle = None
+        if self.offset_handle is not None:
+            self.offset_handle.close()
+            self.offset_handle = None
 
     def __getstate__(self):
-        return {"filename":self.filename, "offsets":self.offsets, "file_handle":None}
+        return {"filename":self.filename, "offset_filename":self.offset_filename, "log_count":self.log_count, "file_handle":None, "offset_handle":None}
 
 class Node:
 
@@ -1663,6 +1665,30 @@ def do_tokenization(logs):
     return tlogs
 
 
+PROCESS_TOKEN_STORE_BATCH_SIZE = 10000
+
+
+def build_process_token_store(logs, directory, batch_size=PROCESS_TOKEN_STORE_BATCH_SIZE):
+    """Tokenize and number rows in order, retaining only one batch before writing it."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    filename = os.path.join(directory, "tokenized-logs.pickle")
+    offset_filename = os.path.join(directory, "tokenized-logs.offsets")
+    global tm004
+    with open(filename, "wb") as token_stream, open(offset_filename, "wb") as offset_stream:
+        for batch_start in range(0, len(logs), batch_size):
+            batch_logs = logs[batch_start:batch_start+batch_size]
+            token_checkpt = time.time()
+            batch_tlogs = [custom_split(log) for log in batch_logs]
+            tm004 += time.time()-token_checkpt
+            uniquify_numbers(batch_tlogs)
+            for tlog in batch_tlogs:
+                offset_stream.write(struct.pack("<Q", token_stream.tell()))
+                pickle.dump(tlog, token_stream, pickle.HIGHEST_PROTOCOL)
+            batch_tlogs.clear()
+    return TokenizedLogFileStore(filename, offset_filename, len(logs))
+
+
 def select_significant_terms(tlog_data):
     # Build bag-of-words with their frequencies
     tm_checkpt = time.time()
@@ -2882,7 +2908,7 @@ reuse_logfilename="CODE50_REUSE_LOG.p"
 # Discovery execution backend.  Keep multiprocessing coordination in this
 # section so the CLI, candidate construction, matching, and leaf scoring stay
 # independent of the execution strategy.
-def run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count=1, parallel_backend="process"):
+def run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count=1, parallel_backend="process", tokenized_log_store=None):
     """Run template discovery with the selected execution strategy.
 
     The original Tree backend remains the default execution path.
@@ -2891,7 +2917,9 @@ def run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, worker_count=1
         if parallel_backend == "thread":
             return _run_parallel_tree_discovery_thread(tree, log_dataset, all_tlogs, worker_count)
         else:
-            return _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, worker_count)
+            if tokenized_log_store is None:
+                raise ValueError("Process discovery requires an indexed tokenized-log store")
+            return _run_parallel_tree_discovery(tree, log_dataset, tokenized_log_store, worker_count)
     if worker_count > 1:
         print("--linear has no candidate branches; using the sequential discovery backend.")
     return _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode)
@@ -3267,7 +3295,14 @@ def _run_parallel_pool_worker_branch(node, branch_state, candidate, candidate_in
         return BranchResult("failure", branch_state=branch_state, failure_traceback=traceback.format_exc(), timers=_discovery_timer_snapshot())
 
 
-def _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, worker_count):
+def _run_parallel_tree_discovery(tree, log_dataset, tokenized_log_store, worker_count):
+    try:
+        return _run_parallel_tree_discovery_from_store(tree, log_dataset, tokenized_log_store, worker_count)
+    finally:
+        tokenized_log_store.close()
+
+
+def _run_parallel_tree_discovery_from_store(tree, log_dataset, tokenized_log_store, worker_count):
     context = multiprocessing.get_context("fork")
 
     def initialize_worker(log_dataset, tokenized_log_store):
@@ -3276,69 +3311,62 @@ def _run_parallel_tree_discovery(tree, log_dataset, all_tlogs, worker_count):
         pool_tokenized_log_store = tokenized_log_store
         pool_tokenized_log_store.open()
 
-    with tempfile.TemporaryDirectory(prefix="lognroll-token-store-") as token_directory:
-        tokenized_log_store = TokenizedLogFileStore.write(all_tlogs, token_directory)
-        # Free the parent's full token table after every tokenized log has been written to the temporary file.
-        all_tlogs.clear()
-        gc.collect()
-
-        root_node = tree.find_node("top")
-        root_branch_state = BranchState()
-        root_branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
-        root_branch_state.seqnum = seqnum
-        root_branch_state.random_state = random.getstate()
-        _reset_discovery_timers()
-        runtime_checkpt = time.time()
-        candidate_set = _run_branch_until_split_or_leaf(root_node, root_branch_state, log_dataset, tokenized_log_store)
-        timer_totals = list(_discovery_timer_snapshot())
-        leaves = []
-        failures = []
-        global_patterns = copy.deepcopy(root_branch_state.discovered_patterns)
-        if candidate_set is None:
-            leaves.append({"branch_path":root_branch_state.branch_path,"node":root_node})
-        else:
-            # Close the parent's file handle so every worker opens its own handle and keeps its own read position.
-            tokenized_log_store.close()
-
-            event_queue = queue.Queue()
-            # Keep branch tasks in the parent until a Pool worker is available instead of filling Pool's internal queue.
-            pending_branches = deque((root_node, root_branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(candidate_set))
-            pool = context.Pool(worker_count, initialize_worker, (log_dataset, tokenized_log_store))
-            pending_count = 0
-
-            # Submit pending branches until every available worker slot is occupied.
-            def submit_available_branches():
-                nonlocal pending_count
-                while pending_count < worker_count and len(pending_branches) > 0:
-                    node, branch_state, candidate, candidate_index = pending_branches.popleft()
-                    branch_state.discovered_patterns = copy.deepcopy(global_patterns)
-                    pool.apply_async(_run_parallel_pool_worker_branch, (node, branch_state, candidate, candidate_index), callback=event_queue.put, error_callback=lambda error:event_queue.put(BranchResult("failure", failure_traceback=repr(error), timers=(0.0,)*11)))
-                    pending_count += 1
-
-            try:
-                submit_available_branches()
-                while pending_count > 0:
-                    result = event_queue.get()
-                    pending_count -= 1
-                    _add_discovery_timers(timer_totals, result.timers)
-                    if result.branch_status == "leaf":
-                        _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
-                        leaves.append({"branch_path":result.branch_state.branch_path,"node":result.node})
-                    elif result.branch_status == "split":
-                        _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
-                        result.branch_state.discovered_patterns = copy.deepcopy(global_patterns)
-                        pending_branches.extend((result.node, result.branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(result.candidate_set))
-                    else:
-                        failures.append(result)
-                        break
-                    submit_available_branches()
-            finally:
-                if len(failures) > 0:
-                    pool.terminate()
-                else:
-                    pool.close()
-                pool.join()
+    root_node = tree.find_node("top")
+    root_branch_state = BranchState()
+    root_branch_state.discovered_patterns = copy.deepcopy(discovered_patterns)
+    root_branch_state.seqnum = seqnum
+    root_branch_state.random_state = random.getstate()
+    _reset_discovery_timers()
+    runtime_checkpt = time.time()
+    candidate_set = _run_branch_until_split_or_leaf(root_node, root_branch_state, log_dataset, tokenized_log_store)
+    timer_totals = list(_discovery_timer_snapshot())
+    leaves = []
+    failures = []
+    global_patterns = copy.deepcopy(root_branch_state.discovered_patterns)
+    if candidate_set is None:
+        leaves.append({"branch_path":root_branch_state.branch_path,"node":root_node})
+    else:
+        # Close the parent's file handle so every worker opens its own handle and keeps its own read position.
         tokenized_log_store.close()
+
+        event_queue = queue.Queue()
+        # Keep branch tasks in the parent until a Pool worker is available instead of filling Pool's internal queue.
+        pending_branches = deque((root_node, root_branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(candidate_set))
+        pool = context.Pool(worker_count, initialize_worker, (log_dataset, tokenized_log_store))
+        pending_count = 0
+
+        # Submit pending branches until every available worker slot is occupied.
+        def submit_available_branches():
+            nonlocal pending_count
+            while pending_count < worker_count and len(pending_branches) > 0:
+                node, branch_state, candidate, candidate_index = pending_branches.popleft()
+                branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                pool.apply_async(_run_parallel_pool_worker_branch, (node, branch_state, candidate, candidate_index), callback=event_queue.put, error_callback=lambda error:event_queue.put(BranchResult("failure", failure_traceback=repr(error), timers=(0.0,)*11)))
+                pending_count += 1
+
+        try:
+            submit_available_branches()
+            while pending_count > 0:
+                result = event_queue.get()
+                pending_count -= 1
+                _add_discovery_timers(timer_totals, result.timers)
+                if result.branch_status == "leaf":
+                    _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                    leaves.append({"branch_path":result.branch_state.branch_path,"node":result.node})
+                elif result.branch_status == "split":
+                    _merge_branch_patterns(global_patterns, result.branch_state.discovered_patterns)
+                    result.branch_state.discovered_patterns = copy.deepcopy(global_patterns)
+                    pending_branches.extend((result.node, result.branch_state, candidate, candidate_index) for candidate_index, candidate in enumerate(result.candidate_set))
+                else:
+                    failures.append(result)
+                    break
+                submit_available_branches()
+        finally:
+            if len(failures) > 0:
+                pool.terminate()
+            else:
+                pool.close()
+            pool.join()
     if len(failures) > 0:
         failure = failures[0]
         failure_path = "unknown" if failure.branch_state is None else failure.branch_state.branch_path
@@ -3538,6 +3566,7 @@ if __name__ == '__main__':
         else:
             linear_mode = bool(args.linear)
 
+        process_token_store_mode = args.workers > 1 and not linear_mode and args.parallel_backend == "process"
         if os.path.exists(reuse_logfilename):
             prev_reuse_logfilename = pickle.load(open(reuse_logfilename,"r"))
         else:
@@ -3581,26 +3610,38 @@ if __name__ == '__main__':
     all_logs = preprocess_known_patterns(raw_logs)
     raw_logs = None
 
-    if clean_mode:
-        if os.path.exists(reuse_filename):
-            os.remove(reuse_filename)
-
-    if os.path.exists(reuse_filename):
-        print("Reusing reuse file ...")
-        all_tlogs = pickle.load(open(reuse_filename,"rb"))
+    all_tlogs = None
+    tokenized_log_store = None
+    token_directory = None
+    if process_token_store_mode:
+        token_directory = tempfile.TemporaryDirectory(prefix="lognroll-token-store-")
+        try:
+            print("Sequence number:", seqnum)
+            print("Tokenizing, numbering, and indexing logs in batches.")
+            tokenized_log_store = build_process_token_store(all_logs, token_directory.name)
+            print("Done tokenizing and indexing.", len(all_logs))
+        except BaseException:
+            token_directory.cleanup()
+            raise
     else:
-        print("Sequence number:", seqnum)
-        print("Tokenizing all logs.")
-        all_tlogs = do_tokenization(all_logs)
-        print("Done tokenizing.", len(all_logs))
+        if clean_mode and os.path.exists(reuse_filename):
+            os.remove(reuse_filename)
+        if os.path.exists(reuse_filename):
+            print("Reusing reuse file ...")
+            all_tlogs = pickle.load(open(reuse_filename,"rb"))
+        else:
+            print("Sequence number:", seqnum)
+            print("Tokenizing all logs.")
+            all_tlogs = do_tokenization(all_logs)
+            print("Done tokenizing.", len(all_logs))
 
-        #apply_all_patterns(all_tlogs)
-        print("Rearranging numbers of known patterns to make values unique ...")
-        uniquify_numbers(all_tlogs)
-        print("Done rearranging values.")
-        print("len(all_tlogs):",len(all_tlogs))
+            #apply_all_patterns(all_tlogs)
+            print("Rearranging numbers of known patterns to make values unique ...")
+            uniquify_numbers(all_tlogs)
+            print("Done rearranging values.")
+            print("len(all_tlogs):",len(all_tlogs))
 
-        pickle.dump(all_tlogs, open(reuse_filename,"wb"))
+            pickle.dump(all_tlogs, open(reuse_filename,"wb"))
 
     # Maps each log index to its immutable score.
     # Example: all_log_scores[7] == 3004; mark_matched_logs() decrements score_counts[3004].
@@ -3614,7 +3655,11 @@ if __name__ == '__main__':
     root_node = tree.create_node("TOP", log_dataset.log_count, "top")
     root_node.score_counts = dict(Counter(all_log_scores))
 
-    discovery_elapsed = run_tree_discovery(tree, log_dataset, all_tlogs,  linear_mode, args.workers, args.parallel_backend)
+    try:
+        discovery_elapsed = run_tree_discovery(tree, log_dataset, all_tlogs, linear_mode, args.workers, args.parallel_backend, tokenized_log_store)
+    finally:
+        if token_directory is not None:
+            token_directory.cleanup()
     parallel_mode = args.workers > 1 and not linear_mode
     if parallel_mode:
         print("Timing mode: aggregate worker work; wall-clock runtime is reported below.")
