@@ -298,10 +298,11 @@ class Tree:
 
     def show(self, position, level=_ROOT):
         queue = self[position].fpointer
+        remaining = "not stored" if queue and not self[position].all_vect else self[position].all_vect.count(-1)
         if level == _ROOT:
-            print(("{0} [{1}] all_vect(-1)={2} len(log_templates)={3}".format(self[position].name, self[position].identifier, self[position].all_vect.count(-1), len(self[position].log_templates))))
+            print(("{0} [{1}] all_vect(-1)={2} len(log_templates)={3}".format(self[position].name, self[position].identifier, remaining, len(self[position].log_templates))))
         else:
-            print((" "*level*10, "{0} [{1}] all_vect(-1)={2} len(log_templates)={3}".format(self[position].name, self[position].identifier, self[position].all_vect.count(-1), len(self[position].log_templates))))
+            print((" "*level*10, "{0} [{1}] all_vect(-1)={2} len(log_templates)={3}".format(self[position].name, self[position].identifier, remaining, len(self[position].log_templates))))
         if self[position].expanded:
             level += 1
             for element in queue:
@@ -3223,7 +3224,8 @@ def _run_branch_until_split_or_leaf(node, branch_state, log_dataset, tokenized_l
 def _rebuild_tree_from_leaves(tree, log_count, leaves):
     tree.nodes = []
     tree.serial = 0
-    root_node = tree.create_node("TOP", log_count, "top")
+    # Rebuilt internal nodes carry topology only; real assignments come from leaves.
+    root_node = tree.create_node("TOP", 0, "top")
     leaves_by_path = {tuple(leaf["branch_path"]):leaf["node"] for leaf in leaves}
     identifiers = {():root_node.identifier}
     # Walk each leaf from root to leaf; reuse shared parents created by earlier paths.
@@ -3233,7 +3235,7 @@ def _rebuild_tree_from_leaves(tree, log_count, leaves):
             if branch_path in identifiers:
                 continue
             identifier = "i"+str(tree.serial)
-            tree.create_node("n"+str(tree.serial), log_count, identifier, parent=identifiers[branch_path[:-1]])
+            tree.create_node("n"+str(tree.serial), 0, identifier, parent=identifiers[branch_path[:-1]])
             identifiers[branch_path] = identifier
             tree.serial += 1
     for leaf_path, leaf_node in leaves_by_path.items():
