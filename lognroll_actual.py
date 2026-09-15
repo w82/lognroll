@@ -2772,8 +2772,8 @@ def tokenize_template_to_fwords(s):
     if s in template_fwords_cache:
         return list(template_fwords_cache[s])
 
-    # "\*" first, or the bare '*' left by the backslash strip would read as a wildcard.
-    tok = custom_split(regex.sub("\\\\","",s.replace("\\*","~200~")))
+    # Decode each escape once, preserving literal backslashes and stars.
+    tok = custom_split(regex.sub(r"\\(.)", lambda match: "~200~" if match.group(1) == "*" else match.group(1), s))
     for y in range(0,len(tok)):
         if '~' in tok[y].replace('~200~',''):
             tok[y]="*"
