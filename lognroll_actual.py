@@ -928,6 +928,8 @@ def preprocess_known_patterns(logs):
                 matched = regex.finditer(item["pattern"], log)
                 for m in matched:
                     label_str = item["prefix"]+"_"+format(int(item["serial"]),'09d')
+                    if item["prefix"].startswith("ts_"):
+                        label_str = "~TimeStamp"+format(int(item["serial"]),'09d')+"~"
                     item["serial"]=str(int(item["serial"])+1)
                     log = log[0:m.start()-diff]+label_str+log[(m.end())-diff:]
                     diff = diff + ((m.end())-(m.start())) - len(label_str)
@@ -3508,8 +3510,7 @@ def _run_parallel_tree_discovery_from_store(tree, log_dataset, tokenized_log_sto
 # it starts running, since the process backend got that isolation for free from pickling
 # at submission time and threads do not.
 def _read_tokenized_log_sample_from_memory(all_tlogs, sample_indices):
-    # Pattern replacement mutates token rows; keep each sample private to its worker.
-    return [list(all_tlogs[log_index]) for log_index in sample_indices]
+    return [all_tlogs[log_index] for log_index in sample_indices]
 
 
 def sample_by_token_length_and_space_count_thread(log_dataset, branch_state, node, all_tlogs):
