@@ -1985,7 +1985,7 @@ def collapse_fenced_wildcards(token):
 def generate_log_template_star(fwords,realcall):
 
     search_patterns = [
-                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+)( |_|:|>|,|\]|\)|\(|/|\"|$)",       "type":"int" },  # int
+                        { "pattern":"(^| |_|:|,|<|\[|\(|\"|/)(\-?\d+)( |_|:|>|,|\]|\)|\(|/|\"|$)",       "type":"int" },  # int
 
 #                        { "pattern":"_\-?\d+",       "type":"int" },  # int
 #                        { "pattern":"\-?\d+_",       "type":"int" },  # int
@@ -2001,11 +2001,11 @@ def generate_log_template_star(fwords,realcall):
 #                        { "pattern":":\-?\d+>",       "type":"int" },  # int
 #                        { "pattern":":\-?\d+:",       "type":"int" },  # int
 
-                        { "pattern":"( |_|:|,|<|\[|/|\"|\()(\-?\d+\.\d+)( |_|:|>|,|\]|\)|/|\"|$)",       "type":"int" },  # FP
+                        { "pattern":"(^| |_|:|,|<|\[|/|\"|\()(\-?\d+\.\d+)( |_|:|>|,|\]|\)|/|\"|$)",       "type":"int" },  # FP
 #                        { "pattern":" \-?\d+\.\d+$",  "type":"float" }, # FP
 
-                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+) ?(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"int_time" }, # millisec, seconds, microsec ... in integer value
-                        { "pattern":"( |_|:|,|<|\[|\(|\"|/)(\-?\d+\.\d+) ?(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"float_time" }, # FP value with unit
+                        { "pattern":"(^| |_|:|,|<|\[|\(|\"|/)(\-?\d+) ?(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"int_time" }, # millisec, seconds, microsec ... in integer value
+                        { "pattern":"(^| |_|:|,|<|\[|\(|\"|/)(\-?\d+\.\d+) ?(ms|msec|millisec|s|sec|second|seconds|us|microsec|KiB|GiB|MB|KB|GB|%)", "type":"float_time" }, # FP value with unit
                         #{ "pattern":"\-?\d+\^\d+", "type":"exponent", "increment":"1" }, # exponent
                         #{ "pattern": "0x[\da-fA-F]+", "type":"hexa1" },
                         #{ "pattern": "[\da-fA-F]+", "type":"hexa2"}
