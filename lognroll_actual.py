@@ -644,6 +644,9 @@ def follows_format(klist):
             smask = smask + "\\d"
         elif all_alpha:
             smask = smask + "[A-Za-z]"
+        # Allow mixed digits and hex letters at the same position.
+        elif all(w[c] in "0123456789abcdefABCDEF" for w in keylist):
+            smask = smask + "[0-9A-Fa-f]"
         else:
             return False
 
