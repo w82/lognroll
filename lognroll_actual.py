@@ -2110,7 +2110,7 @@ def Generate_log_template(fwords):
 
 
 # Static separators fence wildcard-bearing segments.
-COLLAPSE_FENCES = ("\\[", "\\]", "\\(", "\\)", "\\{", "\\}", "=", ":", ",", ";", "<", ">")
+COLLAPSE_FENCES = ("\\[", "\\]", "\\(", "\\)", "\\{", "\\}", "=", ":", ",", ";", "<", ">", "\\|")
 
 def collapse_fenced_wildcards(token):
     # Widen only wildcard-bearing segments while preserving their fences.
