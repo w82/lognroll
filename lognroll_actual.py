@@ -807,6 +807,11 @@ common_patterns = [
 #    {   "pattern":"Wasn't",
 #        "label": "~214~" },
 
+    # BGL-specific workaround: mask node IDs before overlap fallback can fix them.
+    {   "pattern": r"(?<!\S)R[0-9A-F]{2}-M[01]-N[0-9A-F](?:-[CI])?(?=[:\s]|$)",
+        "serial": "1",
+        "prefix":"bgl_node" },
+
     # Mask timestamps before IP/path patterns and tokenization. Word-based
     # dates and compound numeric dates are not handled by uniquify_numbers().
     {   "pattern": r"\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4}\]",
@@ -933,6 +938,8 @@ def preprocess_known_patterns(logs):
                     label_str = item["prefix"]+"_"+format(int(item["serial"]),'09d')
                     if item["prefix"].startswith("ts_"):
                         label_str = "~TimeStamp"+format(int(item["serial"]),'09d')+"~"
+                    elif item["prefix"] == "bgl_node":
+                        label_str = "~BGLNODE"+format(int(item["serial"]),'09d')+"~"
                     item["serial"]=str(int(item["serial"])+1)
                     log = log[0:m.start()-diff]+label_str+log[(m.end())-diff:]
                     diff = diff + ((m.end())-(m.start())) - len(label_str)
