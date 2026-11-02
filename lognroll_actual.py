@@ -1082,12 +1082,11 @@ def uniquify_numbers(tlogs):
                     break
             if found:
                 if p["type"]=="int":
-                    tlogs[i][j] = p["serial"] 
+                    tlogs[i][j] = "~INT"+format(int(p["serial"]),'09d')+"~"
                     p["serial"] = str(int(p["serial"])+int(p["increment"])) #
                 elif p["type"]=="float":
-                    # Keep a decimal representation without binary float drift.
                     serial = int(p["serial"])
-                    tlogs[i][j] = str(serial//10)+"."+str(serial%10)
+                    tlogs[i][j] = "~FLOAT"+format(serial,'09d')+"~"
                     p["serial"] = str(serial+int(p["increment"]))
                 elif p["type"]=="int_time": 
                     tlogs[i][j] = p["serial"]+matched.group(1)
