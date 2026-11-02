@@ -3170,7 +3170,11 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
                         print("   Token to update:", tok_candi[diff_loc])
                         print("   Token to update:", tok_logtm[diff_loc])
                         tok_logtm[diff_loc]="*"
-                        log_template = generate_log_template_star(tok_logtm,True)
+                        merged_template = generate_log_template_star(tok_logtm,True)
+                        if merged_template == ".*":
+                            _debug_event("merge_rejected", old_index=i, old_template=cur_node.log_templates[i]["template"], candidate=log_template, reason="bare_wildcard")
+                            continue
+                        log_template = merged_template
                         _debug_event("merge", old_index=i, old_template=cur_node.log_templates[i]["template"], merged_template=log_template)
                         tok_candi = tokenize_template_to_fwords(log_template)
                         print("   New log_template:", log_template)
@@ -3344,7 +3348,11 @@ def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
         if len(diff_locations) != 1:
             continue
         tok_logtm[diff_locations[0]] = "*"
-        log_template = generate_log_template_star(tok_logtm,True)
+        merged_template = generate_log_template_star(tok_logtm,True)
+        if merged_template == ".*":
+            _debug_event("merge_rejected", old_index=index, old_template=old_template["template"], candidate=log_template, reason="bare_wildcard")
+            continue
+        log_template = merged_template
         _debug_event("merge", old_index=index, old_template=old_template["template"], merged_template=log_template)
         tok_candi = tokenize_template_to_fwords(log_template)
         merged_template_indices.append(index)
