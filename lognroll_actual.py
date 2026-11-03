@@ -808,9 +808,17 @@ common_patterns = [
 #        "label": "~214~" },
 
     # BGL-specific workaround: mask node IDs before overlap fallback can fix them.
-    {   "pattern": r"(?<!\S)R[0-9A-F]{2}-M[01]-N[0-9A-F](?:-[CI])?(?=[:\s]|$)",
+    # IDs also appear inside parentheses and before punctuation, e.g.
+    # mLctn(R33-M1-ND), and node numbers can have two digits (R73-M1-N12.).
+    {   "pattern": r"(?<![\w-])R[0-9A-F]{2}-M[01]-N[0-9A-F]{1,2}(?:-[CI])?(?![\w-])",
         "serial": "1",
         "prefix":"bgl_node" },
+
+    # Colon-separated hex byte sequences: 6-byte MAC addresses and BGL's
+    # 12-byte chip IDs such as mLp(FF:F2:9F:16:BF:44:00:0D:60:E9:40:BB).
+    {   "pattern": r"(?<![0-9A-Fa-f:])[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5,}(?![0-9A-Fa-f:])",
+        "serial": "1",
+        "prefix":"hex_bytes" },
 
     # Mask timestamps before IP/path patterns and tokenization. Word-based
     # dates and compound numeric dates are not handled by uniquify_numbers().
@@ -940,6 +948,8 @@ def preprocess_known_patterns(logs):
                         label_str = "~TimeStamp"+format(int(item["serial"]),'09d')+"~"
                     elif item["prefix"] == "bgl_node":
                         label_str = "~BGLNODE"+format(int(item["serial"]),'09d')+"~"
+                    elif item["prefix"] == "hex_bytes":
+                        label_str = "~HEXBYTES"+format(int(item["serial"]),'09d')+"~"
                     item["serial"]=str(int(item["serial"])+1)
                     log = log[0:m.start()-diff]+label_str+log[(m.end())-diff:]
                     diff = diff + ((m.end())-(m.start())) - len(label_str)
