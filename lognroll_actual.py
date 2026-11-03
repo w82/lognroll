@@ -2656,10 +2656,6 @@ def compute_slcpl(logtem, pair_cache):
                 pair_cache,
             )
 
-        set_len_sum = float(set_len_sum)/float(len(selected))
-
-#        set_len_sum = float(set_len_sum)/float(len(logtem)) # divide by the log template count because template i is compared with all the rest
-
         #print "\n",i,"set_len_sum=",set_len_sum
         #print "    weighted:", float(set_len_sum*selected[i]['count'])/float(total_log_count)
         weighted_cpl_sum += float(set_len_sum*selected[i]['count'])/float(total_log_count) # weighted sum of cpl
