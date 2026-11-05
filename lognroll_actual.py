@@ -901,6 +901,31 @@ common_patterns = [
     {   "pattern":"\-?\d+ (KB|GB|MB|G)(?![A-Za-z])", # 5 GB, 8 G
         "serial": "1",
         "prefix":"data_size_int" },
+
+    # Thunderbird anonymization placeholders. Each #N# replaces one name:
+    #   user name:  Local password failed for user #126#.
+    #   host name:  sshd: connection from "#58#"; [panfs://#27#/home]
+    #   user@host:  Linux version ... (#7#@#9#) (gcc ...); from=<#7#@#207#>
+    # In user@host each side is its own placeholder and is masked separately.
+    # Loghub GT puts <*> at every such position. Adjacent '#' is excluded so HealthApp's 1514038440000##6993##
+    # number separators are untouched. Runs last so earlier masks keep their scope;
+    # a placeholder inside a path ends up next to a file_path marker, so letters
+    # are allowed on either side.
+    {   "pattern": r"(?<!#)#\d+#(?!#)",
+        "serial": "1",
+        "prefix":"anon_id" },
+
+    # sendmail 8.12+ queue IDs, e.g. jBDB4SJX029155, and queue file names, which
+    # are a type letter + 'f' + ID (qf, df, xf, tf, Tf, Qf, hf): qfjBDB4SJX029155.
+    # Per assign_queueid() in sendmail's queue.c, gmtime() fields index
+    # "0-9A-Za-z": year % 60, month 0-11 [0-9AB], day 1-31 [1-9A-V], hour 0-23
+    # [0-9A-N], minute, second % 62 (y/z only for leap seconds), two base-60
+    # sequence characters, then the PID as "%06d" (wider PIDs keep all digits).
+    # At least one letter is required so 14-digit numbers (dates, build
+    # versions) stay intact.
+    {   "pattern": r"(?<![A-Za-z0-9])(?:[qdxtTQh]f)?(?=[0-9A-Za-z]{0,7}[A-Za-z])[0-9A-Za-x][0-9AB][1-9A-V][0-9A-N][0-9A-Za-x][0-9A-Za-z][0-9A-Za-x]{2}\d{6,7}(?![A-Za-z0-9])",
+        "serial": "1",
+        "prefix":"sendmail_qid" },
 ]
 
 KEYVAL_BRACKETS = {"[": "]", "{": "}", "(": ")"}
@@ -950,6 +975,10 @@ def preprocess_known_patterns(logs):
                         label_str = "~BGLNODE"+format(int(item["serial"]),'09d')+"~"
                     elif item["prefix"] == "hex_bytes":
                         label_str = "~HEXBYTES"+format(int(item["serial"]),'09d')+"~"
+                    elif item["prefix"] == "anon_id":
+                        label_str = "~ANONID"+format(int(item["serial"]),'09d')+"~"
+                    elif item["prefix"] == "sendmail_qid":
+                        label_str = "~SMQID"+format(int(item["serial"]),'09d')+"~"
                     item["serial"]=str(int(item["serial"])+1)
                     log = log[0:m.start()-diff]+label_str+log[(m.end())-diff:]
                     diff = diff + ((m.end())-(m.start())) - len(label_str)
