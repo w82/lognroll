@@ -3196,41 +3196,48 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
             tok_candi = tokenize_template_to_fwords(log_template) # tok_candi: tokenized candidate
             merged_template_indices = []
             printed = False
-            for i in range(0,len(cur_node.log_templates)):
-                if cur_node.log_templates[i]==None:
-                    continue
-                tok_logtm = tokenize_template_to_fwords(cur_node.log_templates[i]["template"]) # tok_lt: tokenized log template
+            # A merge widens the candidate, and templates earlier in the list were
+            # only compared with the narrower one. Repeat the pass until nothing
+            # merges, so the result does not depend on the template order.
+            merged_in_pass = True
+            while merged_in_pass:
+                merged_in_pass = False
+                for i in range(0,len(cur_node.log_templates)):
+                    if cur_node.log_templates[i]==None:
+                        continue
+                    tok_logtm = tokenize_template_to_fwords(cur_node.log_templates[i]["template"]) # tok_lt: tokenized log template
 
-                # Compare token by token to see if they have only 1 difference
-                if len(tok_candi)==len(tok_logtm):
-                    diff_count = 0
-                    diff_loc = -1
-                    for j in range(0,len(tok_candi)):
-                        if tok_candi[j]!=tok_logtm[j]:
-                            diff_count+=1
-                            diff_loc = j
-                            if diff_count==2:
-                                break
-                    if diff_count==1:
-                        if not printed:
-                            print("**\033[0;32m", "".join(tok_candi), "\033[0m")
-                            printed = True
-                        print("**\033[0;35m", "".join(tok_logtm), "\033[0m")
+                    # Compare token by token to see if they have only 1 difference
+                    if len(tok_candi)==len(tok_logtm):
+                        diff_count = 0
+                        diff_loc = -1
+                        for j in range(0,len(tok_candi)):
+                            if tok_candi[j]!=tok_logtm[j]:
+                                diff_count+=1
+                                diff_loc = j
+                                if diff_count==2:
+                                    break
+                        if diff_count==1:
+                            if not printed:
+                                print("**\033[0;32m", "".join(tok_candi), "\033[0m")
+                                printed = True
+                            print("**\033[0;35m", "".join(tok_logtm), "\033[0m")
 
-                        print("   Token to update:", tok_candi[diff_loc])
-                        print("   Token to update:", tok_logtm[diff_loc])
-                        tok_logtm[diff_loc]="*"
-                        merged_template = generate_log_template_star(tok_logtm,True)
-                        if merged_template == ".*":
-                            _debug_event("merge_rejected", old_index=i, old_template=cur_node.log_templates[i]["template"], candidate=log_template, reason="bare_wildcard")
-                            continue
-                        log_template = merged_template
-                        _debug_event("merge", old_index=i, old_template=cur_node.log_templates[i]["template"], merged_template=log_template)
-                        tok_candi = tokenize_template_to_fwords(log_template)
-                        print("   New log_template:", log_template)
-                        merged_template_indices.append(i)
-                        cur_node.log_templates[i]=None
-                        cur_node.rep_logs[i]=None
+                            print("   Token to update:", tok_candi[diff_loc])
+                            print("   Token to update:", tok_logtm[diff_loc])
+                            tok_logtm[diff_loc]="*"
+                            merged_template = generate_log_template_star(tok_logtm,True)
+                            if merged_template == ".*":
+                                _debug_event("merge_rejected", old_index=i, old_template=cur_node.log_templates[i]["template"], candidate=log_template, reason="bare_wildcard")
+                                continue
+                            log_template = merged_template
+                            _debug_event("merge", old_index=i, old_template=cur_node.log_templates[i]["template"], merged_template=log_template)
+                            tok_candi = tokenize_template_to_fwords(log_template)
+                            print("   New log_template:", log_template)
+                            merged_template_indices.append(i)
+                            cur_node.log_templates[i]=None
+                            cur_node.rep_logs[i]=None
+                            merged_in_pass = True
 
             removed_count = mark_matched_logs(log_dataset.logs, cur_node.all_vect, cur_node.rep_logs, log_template, len(cur_node.log_templates), cur_node.score_counts, log_dataset.log_scores)
             if removed_count==0:
@@ -3388,26 +3395,31 @@ def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
     _debug_event("apply_linear", template=log_template)
     tok_candi = tokenize_template_to_fwords(log_template)
     merged_template_indices = []
-    for index, old_template in enumerate(node.log_templates):
-        if old_template is None:
-            continue
-        tok_logtm = tokenize_template_to_fwords(old_template["template"])
-        if len(tok_candi) != len(tok_logtm):
-            continue
-        diff_locations = [position for position in range(len(tok_candi)) if tok_candi[position] != tok_logtm[position]]
-        if len(diff_locations) != 1:
-            continue
-        tok_logtm[diff_locations[0]] = "*"
-        merged_template = generate_log_template_star(tok_logtm,True)
-        if merged_template == ".*":
-            _debug_event("merge_rejected", old_index=index, old_template=old_template["template"], candidate=log_template, reason="bare_wildcard")
-            continue
-        log_template = merged_template
-        _debug_event("merge", old_index=index, old_template=old_template["template"], merged_template=log_template)
-        tok_candi = tokenize_template_to_fwords(log_template)
-        merged_template_indices.append(index)
-        node.log_templates[index] = None
-        node.rep_logs[index] = None
+    # Repeat the pass until nothing merges; see _run_sequential_tree_discovery.
+    merged_in_pass = True
+    while merged_in_pass:
+        merged_in_pass = False
+        for index, old_template in enumerate(node.log_templates):
+            if old_template is None:
+                continue
+            tok_logtm = tokenize_template_to_fwords(old_template["template"])
+            if len(tok_candi) != len(tok_logtm):
+                continue
+            diff_locations = [position for position in range(len(tok_candi)) if tok_candi[position] != tok_logtm[position]]
+            if len(diff_locations) != 1:
+                continue
+            tok_logtm[diff_locations[0]] = "*"
+            merged_template = generate_log_template_star(tok_logtm,True)
+            if merged_template == ".*":
+                _debug_event("merge_rejected", old_index=index, old_template=old_template["template"], candidate=log_template, reason="bare_wildcard")
+                continue
+            log_template = merged_template
+            _debug_event("merge", old_index=index, old_template=old_template["template"], merged_template=log_template)
+            tok_candi = tokenize_template_to_fwords(log_template)
+            merged_template_indices.append(index)
+            node.log_templates[index] = None
+            node.rep_logs[index] = None
+            merged_in_pass = True
     removed_count = mark_matched_logs(log_dataset.logs, node.all_vect, node.rep_logs, log_template, len(node.log_templates), node.score_counts, log_dataset.log_scores)
     if removed_count == 0:
         raise RuntimeError("linear candidate removed no logs in branch "+str(branch_state.branch_path)+": "+str(log_template))
