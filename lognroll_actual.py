@@ -3110,6 +3110,34 @@ def _has_enough_static_words(fwords):
     return variable_count <= word_count
 
 
+def _find_covered_templates(log_template, log_templates, rep_logs, all_vect, logs):
+    """Indices of existing templates whose logs all match log_template.
+
+    mark_matched_logs only claims unassigned logs, so a wide template created
+    after a narrow one it fully covers would otherwise leave the narrow one in
+    place (e.g. FSNamesystem: isPermissionEnabled = false next to
+    FSNamesystem: .* = .*), while the opposite order yields one template. The
+    caller moves these templates' logs to log_template and drops them.
+
+    A template's representative log is one of its own logs, so it must match
+    first; only those templates have all their logs checked.
+    """
+    matcher = regex.compile("^"+log_template+"$")
+    covered = set()
+    for index, template in enumerate(log_templates):
+        if template is None or rep_logs[index] is None:
+            continue
+        if matcher.match(rep_logs[index]) is not None:
+            covered.add(index)
+    if not covered:
+        return []
+    for position, template_index in enumerate(all_vect):
+        if template_index in covered and matcher.match(logs[position]) is None:
+            covered.discard(template_index)
+            if not covered:
+                break
+    return sorted(covered)
+
 # Discovery execution backend.  Keep multiprocessing coordination in this
 # section so the CLI, candidate construction, matching, and leaf scoring stay
 # independent of the execution strategy.
@@ -3285,6 +3313,13 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
             #    print "["+format(len(cur_node.log_templates),'3d')+"]", format(cur_node.all_vect.count(-1),'5d'), format(removed_count,'4d'), log_template
             #print "["+format(len(cur_node.log_templates),'3d')+"]", format(cur_node.all_vect.count(-1),'5d'), format(removed_count,'4d'), log_template
             #print "\""+re.sub("\"","\\\"",log_template)+"\","
+            # Absorb existing templates whose logs the new template fully covers.
+            for i in _find_covered_templates(log_template, cur_node.log_templates, cur_node.rep_logs, cur_node.all_vect, log_dataset.logs):
+                print("   Absorbed:", cur_node.log_templates[i]["template"])
+                _debug_event("absorb", old_index=i, old_template=cur_node.log_templates[i]["template"], template=log_template)
+                merged_template_indices.append(i)
+                cur_node.log_templates[i]=None
+                cur_node.rep_logs[i]=None
             # Transfer logs from merged templates to the new template index.
             previously_matched_count = 0
             for j in range(0,len(cur_node.all_vect)):
@@ -3452,6 +3487,13 @@ def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
     removed_count = mark_matched_logs(log_dataset.logs, node.all_vect, node.rep_logs, log_template, len(node.log_templates), node.score_counts, log_dataset.log_scores)
     if removed_count == 0:
         raise RuntimeError("linear candidate removed no logs in branch "+str(branch_state.branch_path)+": "+str(log_template))
+    # Absorb existing templates whose logs the new template fully covers.
+    for index in _find_covered_templates(log_template, node.log_templates, node.rep_logs, node.all_vect, log_dataset.logs):
+        print("   Absorbed:", node.log_templates[index]["template"])
+        _debug_event("absorb", old_index=index, old_template=node.log_templates[index]["template"], template=log_template)
+        merged_template_indices.append(index)
+        node.log_templates[index] = None
+        node.rep_logs[index] = None
     for position, template_index in enumerate(node.all_vect):
         if template_index in merged_template_indices:
             node.all_vect[position] = len(node.log_templates)
