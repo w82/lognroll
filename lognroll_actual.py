@@ -956,10 +956,26 @@ def mask_bracketed_key_values(log):
         pos += len(label_str)
     return log
 
+# Dots before the number that ends the line. '.' is not a delimiter, so the
+# name and the number would stay one static token; a space lets the number
+# become a wildcard.
+# - 3+ dots are padding between a field name and its value, whatever precedes
+#   them: BGL "memory manager uncorrectable error...............1",
+#   "machine check: i-fetch......................0", "fp cr field .............0"
+#   (the space before the dots is replaced too), "(0=sup,1=usr).......0".
+# - 1-2 dots are either short padding ("unimplemented operation..0", "block
+#   touch.0") or a name.number token ("generating core.304", Zookeeper
+#   "log.100000001"). The name must be a whole word of letters and '_', so PCI
+#   addresses (0000:00:1d.0), paths (/x/spasm.1), library versions
+#   (ld-linux.so.2), IPs, floats and dates are untouched.
+# Only the line end is split: mid-line "initramfs...it isn't" and Mac
+# "QQ.10018 tc18777" stay as they are, as in Loghub GT.
+DOT_NUMBER_SUFFIX_PATTERN = regex.compile(r"(?:(?<=(?<![\w.\-/:~])[A-Za-z_]+)\.{1,2}|(?<=\S) ?\.{3,})(?=\d+\s*$)")
+
 def preprocess_known_patterns(logs):
     processed = []
     for i in range(0,len(logs)):
-        log = logs[i]
+        log = DOT_NUMBER_SUFFIX_PATTERN.sub(" ", logs[i])
         for item in common_patterns:
 
             found = True
