@@ -3089,6 +3089,27 @@ prepopulated_log_templates = []
 
 reuse_filename="CODE50_REUSE.p"
 
+
+def _has_enough_static_words(fwords):
+    """Merge guard: a merged template must keep at least as many words as wildcards.
+
+    A word is a static token with a letter or digit; punctuation such as ':' and
+    '=' only gives the format and does not tell which event it is. A wildcard is
+    always its own '*' token (a literal '*' is preprocessed into a marker), e.g.
+    INFO .*: .* = .* (1 word, 3 wildcards) is rejected, while
+    INFO BlockManager: .* = .* (2 and 2) and BuildActDeviceEntry .* (1 and 1)
+    are kept.
+    """
+    variable_count = 0
+    word_count = 0
+    for token in fwords:
+        if token == "*":
+            variable_count += 1
+        elif any(char.isalnum() for char in token):
+            word_count += 1
+    return variable_count <= word_count
+
+
 # Discovery execution backend.  Keep multiprocessing coordination in this
 # section so the CLI, candidate construction, matching, and leaf scoring stay
 # independent of the execution strategy.
@@ -3229,6 +3250,10 @@ def _run_sequential_tree_discovery(tree, log_dataset, all_tlogs, linear_mode):
                             merged_template = generate_log_template_star(tok_logtm,True)
                             if merged_template == ".*":
                                 _debug_event("merge_rejected", old_index=i, old_template=cur_node.log_templates[i]["template"], candidate=log_template, reason="bare_wildcard")
+                                continue
+                            if not _has_enough_static_words(tok_logtm):
+                                print("   Merge rejected (too few static words):", merged_template)
+                                _debug_event("merge_rejected", old_index=i, old_template=cur_node.log_templates[i]["template"], candidate=log_template, reason="too_few_static_words")
                                 continue
                             log_template = merged_template
                             _debug_event("merge", old_index=i, old_template=cur_node.log_templates[i]["template"], merged_template=log_template)
@@ -3412,6 +3437,10 @@ def _apply_linear_candidate(node, branch_state, log_template, log_dataset):
             merged_template = generate_log_template_star(tok_logtm,True)
             if merged_template == ".*":
                 _debug_event("merge_rejected", old_index=index, old_template=old_template["template"], candidate=log_template, reason="bare_wildcard")
+                continue
+            if not _has_enough_static_words(tok_logtm):
+                print("   Merge rejected (too few static words):", merged_template)
+                _debug_event("merge_rejected", old_index=index, old_template=old_template["template"], candidate=log_template, reason="too_few_static_words")
                 continue
             log_template = merged_template
             _debug_event("merge", old_index=index, old_template=old_template["template"], merged_template=log_template)
